@@ -1225,9 +1225,7 @@ TabExecutor {
         }
         switch (sub = a.length == 0 ? "give" : a[0].toLowerCase()) {
             case "give": {
-                Player pl;
-                Player target;
-                Object object = a.length > 1 ? Bukkit.getPlayerExact((String)a[1]) : (target = s instanceof Player ? (pl = (Player)s) : null);
+                final Player target = a.length > 1 ? Bukkit.getPlayerExact(a[1]) : (s instanceof Player pl ? pl : null);
                 if (target == null) {
                     s.sendMessage("\u00a7c\u0413\u0440\u0430\u0432\u0446\u044f \u043d\u0435 \u0437\u043d\u0430\u0439\u0434\u0435\u043d\u043e.");
                     return true;
