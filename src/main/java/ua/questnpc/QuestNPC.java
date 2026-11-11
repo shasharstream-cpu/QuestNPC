@@ -252,7 +252,7 @@ TabExecutor {
         ItemMeta meta = item.getItemMeta();
         meta.displayName(this.text("&d\u041c\u0456\u0437\u043a\u043e\u043f\u0440\u0430\u0432"));
         meta.lore(List.of(this.text("&7\u041f\u041a\u041c \u043f\u043e \u0431\u043b\u043e\u043a\u0443 - \u0441\u0442\u0432\u043e\u0440\u0438\u0442\u0438 NPC."), this.text("&7\u041f\u041a\u041c \u043f\u043e NPC - \u043d\u0430\u043b\u0430\u0448\u0442\u0443\u0432\u0430\u0442\u0438.")));
-        meta.getPersistentDataContainer().set(this.wandKey, PersistentDataType.BYTE, (Object)1);
+        meta.getPersistentDataContainer().set(this.wandKey, PersistentDataType.BYTE, (byte)1);
         item.setItemMeta(meta);
         return item;
     }
@@ -305,7 +305,7 @@ TabExecutor {
     }
 
     private void setup(Mannequin m, Npc n) {
-        m.getPersistentDataContainer().set(this.npcKey, PersistentDataType.INTEGER, (Object)n.id);
+        m.getPersistentDataContainer().set(this.npcKey, PersistentDataType.INTEGER, n.id);
         m.customName((Component)LEGACY.deserialize(n.name));
         m.setCustomNameVisible(true);
         m.setDescription(null);
@@ -345,12 +345,12 @@ TabExecutor {
             return;
         }
         PlayerProfile profile = Bukkit.createProfile((String)n.skin);
-        ((CompletableFuture)profile.update().thenAccept(resolved -> this.sync(() -> {
+        profile.update().thenAccept(resolved -> this.sync(() -> {
             Mannequin m = this.entityOf(n);
             if (m != null && resolved != null) {
                 m.setProfile(ResolvableProfile.resolvableProfile((PlayerProfile)resolved));
             }
-        }))).exceptionally(ex -> {
+        })).exceptionally(ex -> {
             this.getLogger().warning("\u041d\u0435 \u0432\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0438\u0442\u0438 \u0441\u043a\u0456\u043d '" + n.skin + "': " + ex.getMessage());
             return null;
         });
@@ -410,7 +410,7 @@ TabExecutor {
             Node parent = node.parent;
             buttons.add(this.btn("&e< \u041d\u0430\u0437\u0430\u0434", v -> this.sync(() -> this.openNode(p, n, parent))));
         }
-        NoticeType type = buttons.isEmpty() ? DialogType.notice((ActionButton)this.btn("&7\u0417\u0430\u043a\u0440\u0438\u0442\u0438", null)) : DialogType.multiAction(buttons, (ActionButton)this.btn("&7\u0417\u0430\u043a\u0440\u0438\u0442\u0438", null), (int)1);
+        DialogType type = buttons.isEmpty() ? DialogType.notice((ActionButton)this.btn("&7\u0417\u0430\u043a\u0440\u0438\u0442\u0438", null)) : DialogType.multiAction(buttons, (ActionButton)this.btn("&7\u0417\u0430\u043a\u0440\u0438\u0442\u0438", null), (int)1);
         p.showDialog((DialogLike)this.dialog(n.name, List.of(DialogBody.plainMessage((Component)this.fmt(node.text, p))), List.of(), (DialogType)type));
     }
 
