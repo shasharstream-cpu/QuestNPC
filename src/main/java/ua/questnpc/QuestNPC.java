@@ -172,6 +172,7 @@ TabExecutor {
         this.wandKey = new NamespacedKey((Plugin)this, "wand");
         this.npcKey = new NamespacedKey((Plugin)this, "npc_id");
         this.getDataFolder().mkdirs();
+        this.saveDefaultConfig();
         this.dataFile = new File(this.getDataFolder(), "npcs.yml");
         this.progressFile = new File(this.getDataFolder(), "progress.yml");
         this.questsFile = new File(this.getDataFolder(), "quests.yml");
@@ -199,6 +200,9 @@ TabExecutor {
     }
 
     public void onDisable() {
+        for (UUID id : new ArrayList<>(this.bubbles.keySet())) {
+            this.removeBubble(id);
+        }
         this.save();
         this.saveProgress();
     }
@@ -208,7 +212,7 @@ TabExecutor {
     }
 
     private Component fmt(String raw, Player p) {
-        return LEGACY.deserialize(raw.replace("{player}", p.getName()));
+        return LEGACY.deserialize(this.papi(p, raw.replace("{player}", p.getName())));
     }
 
     private static String clean(String s, String fallback) {
@@ -396,7 +400,11 @@ TabExecutor {
             }
         } else {
             this.questsOnTalk(p, n.id);
-            this.openNode(p, n, n.root);
+            if (this.useHub(p, n)) {
+                this.openHub(p, n);
+            } else {
+                this.openNode(p, n, n.root);
+            }
         }
     }
 
@@ -409,8 +417,11 @@ TabExecutor {
         if (node.parent != null) {
             Node parent = node.parent;
             buttons.add(this.btn("&e< \u041d\u0430\u0437\u0430\u0434", v -> this.sync(() -> this.openNode(p, n, parent))));
+        } else if (this.useHub(p, n)) {
+            buttons.add(this.btn("&e< Меню", v -> this.sync(() -> this.openHub(p, n))));
         }
         DialogType type = buttons.isEmpty() ? DialogType.notice((ActionButton)this.btn("&7\u0417\u0430\u043a\u0440\u0438\u0442\u0438", null)) : DialogType.multiAction(buttons, (ActionButton)this.btn("&7\u0417\u0430\u043a\u0440\u0438\u0442\u0438", null), (int)1);
+        this.showBubble(p, n, node.text);
         p.showDialog((DialogLike)this.dialog(n.name, List.of(DialogBody.plainMessage((Component)this.fmt(node.text, p))), List.of(), (DialogType)type));
     }
 
@@ -512,7 +523,7 @@ TabExecutor {
                 p.sendMessage(this.text("&c\u0421\u0443\u0442\u043d\u0456\u0441\u0442\u044c NPC \u043d\u0435 \u0437\u043d\u0430\u0439\u0434\u0435\u043d\u043e (\u043c\u043e\u0436\u043b\u0438\u0432\u043e, \u0457\u0457 \u0432\u0431\u0438\u043b\u0438). \u0412\u0438\u0434\u0430\u043b\u0438 \u0439 \u0441\u0442\u0432\u043e\u0440\u0438 \u0437\u0430\u043d\u043e\u0432\u043e."));
             }
             this.openSettings(p, n);
-        })), this.btn("&6\u041a\u0432\u0435\u0441\u0442\u0438 (\u0440\u0435\u0434\u0430\u043a\u0442\u043e\u0440)", v -> this.sync(() -> this.openQuestList(p))), this.btn("&c\u0412\u0438\u0434\u0430\u043b\u0438\u0442\u0438 NPC", v -> this.sync(() -> this.openDelete(p, n))));
+        })), this.btn("Меню вибору (GUI)", v -> this.sync(() -> this.openHubEditor(p, n))), this.btn("&6\u041a\u0432\u0435\u0441\u0442\u0438 (\u0440\u0435\u0434\u0430\u043a\u0442\u043e\u0440)", v -> this.sync(() -> this.openQuestList(p))), this.btn("&c\u0412\u0438\u0434\u0430\u043b\u0438\u0442\u0438 NPC", v -> this.sync(() -> this.openDelete(p, n))));
         p.showDialog((DialogLike)this.dialog("&5NPC #" + n.id + ": " + n.name, List.of(this.para("\u0429\u043e \u0437\u043c\u0456\u043d\u0438\u0442\u0438?")), List.of(), (DialogType)DialogType.multiAction(buttons, (ActionButton)this.btn("&7\u0417\u0430\u043a\u0440\u0438\u0442\u0438", null), (int)1)));
     }
 
@@ -912,6 +923,7 @@ TabExecutor {
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         this.lastUse.remove(e.getPlayer().getUniqueId());
+        this.removeBubble(e.getPlayer().getUniqueId());
     }
 
     private String encode(ItemStack item) {
@@ -935,6 +947,11 @@ TabExecutor {
             y.set(b + "z", (Object)n.loc.getZ());
             y.set(b + "yaw", (Object)n.loc.getYaw());
             y.set(b + "entity", n.entity == null ? null : n.entity.toString());
+            y.set(b + "hub.text", n.hubText);
+            y.set(b + "hub.trade", n.tradeLabel);
+            y.set(b + "hub.dialog", n.dialogLabel);
+            y.set(b + "hub.quest", n.questLabel);
+            y.set(b + "hub.mode", n.menuMode);
             y.set(b + "tree", (Object)this.nodeToJson(n.root).toString());
             ArrayList list = new ArrayList();
             for (Trade t : n.trades) {
@@ -978,6 +995,11 @@ TabExecutor {
                 n.loc = new Location(w, s.getDouble("x"), s.getDouble("y"), s.getDouble("z"), (float)s.getDouble("yaw"), 0.0f);
                 String ent = s.getString("entity");
                 n.entity = ent == null ? null : UUID.fromString(ent);
+                n.hubText = s.getString("hub.text", "");
+                n.tradeLabel = s.getString("hub.trade", "");
+                n.dialogLabel = s.getString("hub.dialog", "");
+                n.questLabel = s.getString("hub.quest", "");
+                n.menuMode = Math.max(0, Math.min(2, s.getInt("hub.mode", 0)));
                 this.loadTree(s, n);
                 for (Map m : s.getMapList("trades")) {
                     Object p1 = m.get("p1");
@@ -1289,6 +1311,7 @@ TabExecutor {
                 break;
             }
             case "reload": {
+                this.reloadConfig();
                 this.loadQuests();
                 s.sendMessage("\u00a7aquests.yml \u043f\u0435\u0440\u0435\u0437\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0435\u043d\u043e. \u041a\u0432\u0435\u0441\u0442\u0456\u0432: " + this.quests.size());
                 break;
@@ -1684,6 +1707,295 @@ TabExecutor {
             (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад (без збереження)", v -> this.sync(() -> this.openStages(p, q))), (int) 1)));
     }
 
+    // ======================= ПЛЕЙСХОЛДЕРИ І БУЛЬБАШКА НАД NPC =======================
+
+    private java.lang.reflect.Method papiMethod;
+    private boolean papiChecked;
+    private final Map<UUID, org.bukkit.entity.TextDisplay> bubbles = new HashMap<>();
+
+    /** Підставляє плейсхолдери PlaceholderAPI (а через нього й CMI), якщо плагін встановлено. */
+    private String papi(Player p, String raw) {
+        if (raw == null || raw.indexOf('%') < 0 || !this.getConfig().getBoolean("placeholders", true)) {
+            return raw;
+        }
+        if (!this.papiChecked) {
+            this.papiChecked = true;
+            if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
+                try {
+                    this.papiMethod = Class.forName("me.clip.placeholderapi.PlaceholderAPI")
+                        .getMethod("setPlaceholders", org.bukkit.OfflinePlayer.class, String.class);
+                    this.getLogger().info("PlaceholderAPI знайдено - плейсхолдери в діалогах увімкнено.");
+                } catch (ReflectiveOperationException ex) {
+                    this.getLogger().warning("Не вдалося підключити PlaceholderAPI: " + ex.getMessage());
+                }
+            }
+        }
+        if (this.papiMethod == null) {
+            return raw;
+        }
+        try {
+            Object r = this.papiMethod.invoke(null, p, raw);
+            return r instanceof String s ? s : raw;
+        } catch (ReflectiveOperationException | RuntimeException ex) {
+            return raw;
+        }
+    }
+
+    private void removeBubble(UUID id) {
+        org.bukkit.entity.TextDisplay old = this.bubbles.remove(id);
+        if (old != null && old.isValid()) {
+            old.remove();
+        }
+    }
+
+    /** Показує репліку NPC над його головою - лише тому гравцю, який з ним говорить. */
+    private void showBubble(Player p, Npc n, String raw) {
+        UUID id = p.getUniqueId();
+        this.removeBubble(id);
+        if (!this.getConfig().getBoolean("bubble.enabled", true)) {
+            return;
+        }
+        Mannequin m = this.entityOf(n);
+        if (m == null) {
+            return;
+        }
+        String t = this.papi(p, raw.replace("{player}", p.getName())).replaceAll("\\s*\\R\\s*", " ").strip();
+        int max = Math.max(20, this.getConfig().getInt("bubble.max-length", 140));
+        if (t.length() > max) {
+            t = t.substring(0, max).stripTrailing();
+            if (t.endsWith("&")) {
+                t = t.substring(0, t.length() - 1);
+            }
+            t = t + "…";
+        }
+        if (t.isBlank()) {
+            return;
+        }
+        final String shown = t;
+        double offset = this.getConfig().getDouble("bubble.height-offset", 0.7);
+        Location loc = m.getLocation().add(0.0, m.getHeight() + offset, 0.0);
+        org.bukkit.entity.TextDisplay d = m.getWorld().spawn(loc, org.bukkit.entity.TextDisplay.class, d0 -> {
+            d0.setPersistent(false);
+            d0.setVisibleByDefault(false);
+            d0.text(LEGACY.deserialize(shown));
+            d0.setBillboard(org.bukkit.entity.Display.Billboard.CENTER);
+            d0.setAlignment(org.bukkit.entity.TextDisplay.TextAlignment.CENTER);
+            d0.setLineWidth(180);
+        });
+        p.showEntity(this, d);
+        this.bubbles.put(id, d);
+        long ticks = Math.max(60L, Math.min(300L, 40L + (long) shown.length() * 3L));
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (this.bubbles.get(id) == d) {
+                this.removeBubble(id);
+            } else if (d.isValid()) {
+                d.remove();
+            }
+        }, ticks);
+    }
+
+    // ======================= МЕНЮ ВИБОРУ ДІЇ З NPC =======================
+
+    private void collectQuestIds(Node node, java.util.Set<String> out) {
+        for (Choice c : node.choices) {
+            String a = c.action == null ? "" : c.action.trim().toLowerCase(Locale.ROOT);
+            if (a.startsWith("quest:")) {
+                out.add(a.substring(6).trim());
+            } else if (a.startsWith("turnin:")) {
+                out.add(a.substring(7).trim());
+            }
+            if (c.next != null) {
+                this.collectQuestIds(c.next, out);
+            }
+        }
+    }
+
+    /** Квести цього NPC: ті, що він видає або приймає в діалозі, і ті, що гравець зараз виконує з ним. */
+    private List<Quest> npcQuests(Player p, Npc n) {
+        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
+        this.collectQuestIds(n.root, ids);
+        Map<String, QState> m = this.progress.get(p.getUniqueId());
+        if (m != null) {
+            for (Map.Entry<String, QState> en : m.entrySet()) {
+                Quest q = this.quests.get(en.getKey());
+                QState st = en.getValue();
+                if (q == null || !"ACTIVE".equals(st.status) || st.stage >= q.stages.size()) {
+                    continue;
+                }
+                if (q.stages.get(st.stage).npc == n.id) {
+                    ids.add(q.id);
+                }
+            }
+        }
+        List<Quest> out = new ArrayList<>();
+        for (String id : ids) {
+            Quest q = this.quests.get(id);
+            if (q != null) {
+                out.add(q);
+            }
+        }
+        return out;
+    }
+
+    private String questTag(Player p, Quest q) {
+        QState st = this.stateOf(p, q.id);
+        if (st == null) {
+            return "&a[Новий] &f";
+        }
+        return switch (st.status) {
+            case "READY" -> "&6[Здати] &f";
+            case "DONE" -> q.repeatable ? "&a[Знову] &f" : "&7[Виконано] &7";
+            default -> "&e[У процесі] &f";
+        };
+    }
+
+    private boolean hubUseful(Player p, Npc n) {
+        return !n.trades.isEmpty() || !this.npcQuests(p, n).isEmpty();
+    }
+
+    private void openHub(Player p, Npc n) {
+        List<ActionButton> buttons = new ArrayList<>();
+        if (!n.trades.isEmpty()) {
+            buttons.add(this.btn(n.tradeLabel.isBlank() ? "&aТоргівля" : n.tradeLabel, v -> this.sync(() -> this.openTrade(p, n))));
+        }
+        buttons.add(this.btn(n.dialogLabel.isBlank() ? "&bДіалог" : n.dialogLabel, v -> this.sync(() -> this.openNode(p, n, n.root))));
+        int qn = this.npcQuests(p, n).size();
+        if (qn > 0) {
+            buttons.add(this.btn((n.questLabel.isBlank() ? "&6Квест" : n.questLabel) + (qn > 1 ? " &7(" + qn + ")" : ""), v -> this.sync(() -> this.openQuestMenu(p, n))));
+        }
+        p.showDialog((DialogLike) this.dialog(n.name,
+            List.of(DialogBody.plainMessage((Component) this.fmt(n.hubText.isBlank() ? "Чим займемось, {player}?" : n.hubText, p))),
+            List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Закрити", null), (int) 1)));
+    }
+
+    private void openQuestMenu(Player p, Npc n) {
+        List<ActionButton> buttons = new ArrayList<>();
+        for (Quest q : this.npcQuests(p, n)) {
+            buttons.add(this.btn(this.questTag(p, q) + q.name, v -> this.sync(() -> this.openQuestDetail(p, n, q))));
+        }
+        if (buttons.isEmpty()) {
+            this.openHub(p, n);
+            return;
+        }
+        p.showDialog((DialogLike) this.dialog(n.name + " &8- &6Квести",
+            List.of(this.para("Обери квест, щоб побачити подробиці.")),
+            List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openHub(p, n))), (int) 1)));
+    }
+
+    private void openQuestDetail(Player p, Npc n, Quest q) {
+        QState st = this.stateOf(p, q.id);
+        boolean fresh = st == null || "DONE".equals(st.status) && q.repeatable;
+        List<DialogBody> body = new ArrayList<>();
+        if (!q.description.isBlank()) {
+            body.add(DialogBody.plainMessage((Component) this.fmt(q.description, p)));
+        }
+        StringBuilder sb = new StringBuilder("&6Етапи:");
+        for (int i = 0; i < q.stages.size(); i++) {
+            Stage sg = q.stages.get(i);
+            boolean allDone = st != null && ("READY".equals(st.status) || "DONE".equals(st.status) && !q.repeatable);
+            boolean done = allDone || st != null && !fresh && i < st.stage;
+            boolean current = !allDone && !fresh && st != null && i == st.stage;
+            sb.append("\n").append(done ? "&a✔ &7" : current ? "&e▶ &f" : "&8○ &7").append(sg.text);
+            if (current && sg.type.equals("kill")) {
+                sb.append(" &8(").append(st.count).append("/").append(sg.amount).append(")");
+            }
+        }
+        body.add(DialogBody.plainMessage((Component) this.fmt(sb.toString(), p)));
+        List<String> rewards = new ArrayList<>();
+        if (q.xp > 0) {
+            rewards.add(q.xp + " досвіду");
+        }
+        for (String it : q.items) {
+            rewards.add(it.replace(":", " x"));
+        }
+        if (!rewards.isEmpty()) {
+            body.add(DialogBody.plainMessage((Component) this.fmt("&6Нагорода: &f" + String.join(", ", rewards), p)));
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        if (fresh) {
+            buttons.add(this.btn("&aВзяти квест", v -> this.sync(() -> {
+                this.startQuest(p, q.id);
+                this.openQuestDetail(p, n, q);
+            })));
+        } else if ("READY".equals(st.status)) {
+            buttons.add(this.btn("&6Здати квест", v -> this.sync(() -> {
+                this.turnIn(p, q.id);
+                this.openQuestDetail(p, n, q);
+            })));
+        }
+        ActionButton back = this.btn("&7Назад", v -> this.sync(() -> this.openQuestMenu(p, n)));
+        DialogType type = buttons.isEmpty()
+            ? DialogType.notice(back)
+            : DialogType.multiAction(buttons, back, (int) 1);
+        p.showDialog((DialogLike) this.dialog("&6" + q.name, body, List.of(), type));
+    }
+
+    // ======================= РЕДАКТОР МЕНЮ ВИБОРУ (GUI) =======================
+
+    private boolean useHub(Player p, Npc n) {
+        if (n.menuMode == 2) {
+            return false;
+        }
+        if (n.menuMode == 1) {
+            return true;
+        }
+        return this.getConfig().getBoolean("menu.enabled", true) && this.hubUseful(p, n);
+    }
+
+    private void applyHub(Npc n, Function<String, String> v) {
+        n.hubText = QuestNPC.clean(v.apply("hubtext"), "");
+        n.tradeLabel = QuestNPC.clean(v.apply("tlabel"), "");
+        n.dialogLabel = QuestNPC.clean(v.apply("dlabel"), "");
+        n.questLabel = QuestNPC.clean(v.apply("qlabel"), "");
+    }
+
+    private void openHubEditor(Player p, Npc n) {
+        List<DialogInput> inputs = new ArrayList<>();
+        inputs.add(this.block("hubtext", "Привітання в меню ({player}, плейсхолдери; порожньо = стандартне)", n.hubText, 200));
+        inputs.add(this.line("tlabel", "Кнопка торгівлі (порожньо = «Торгівля»)", n.tradeLabel, 40));
+        inputs.add(this.line("dlabel", "Кнопка діалогу (порожньо = «Діалог»)", n.dialogLabel, 40));
+        inputs.add(this.line("qlabel", "Кнопка квестів (порожньо = «Квест»)", n.questLabel, 40));
+        String mode = switch (n.menuMode) {
+            case 1 -> "&aзавжди показувати";
+            case 2 -> "&cвимкнене (одразу діалог)";
+            default -> "&eавто (за config.yml)";
+        };
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(this.btn("&aЗберегти", v -> this.sync(() -> {
+            this.applyHub(n, v);
+            this.save();
+            p.sendMessage(this.text("&aМеню збережено."));
+            this.openHubEditor(p, n);
+        })));
+        buttons.add(this.btn("Переглянути меню", v -> this.sync(() -> {
+            this.applyHub(n, v);
+            this.save();
+            this.openHub(p, n);
+        })));
+        buttons.add(this.btn("Показ меню: " + mode, v -> this.sync(() -> {
+            this.applyHub(n, v);
+            n.menuMode = (n.menuMode + 1) % 3;
+            this.save();
+            this.openHubEditor(p, n);
+        })));
+        buttons.add(this.btn("&cСкинути до стандартних", v -> this.sync(() -> {
+            n.hubText = "";
+            n.tradeLabel = "";
+            n.dialogLabel = "";
+            n.questLabel = "";
+            n.menuMode = 0;
+            this.save();
+            p.sendMessage(this.text("&aМеню скинуто."));
+            this.openHubEditor(p, n);
+        })));
+        p.showDialog((DialogLike) this.dialog("&5Меню вибору: " + n.name,
+            List.of(this.para("Це меню бачить гравець при кліку по NPC: торгівля / діалог / квест. Кнопки «Торгівля» і «Квест» з'являються лише коли в NPC є угоди чи квести.")),
+            inputs,
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openSettings(p, n))), (int) 1)));
+    }
+
     private Npc byArg(String[] a) {
         if (a.length < 2) {
             return null;
@@ -1713,6 +2025,11 @@ TabExecutor {
         final int id;
         String name = "NPC";
         String skin = "";
+        String hubText = "";
+        String tradeLabel = "";
+        String dialogLabel = "";
+        String questLabel = "";
+        int menuMode = 0;
         Node root = new Node("\u041f\u0440\u0438\u0432\u0456\u0442, {player}!", null, "");
         final List<Trade> trades = new ArrayList<Trade>();
         Location loc;
