@@ -1457,8 +1457,8 @@ TabExecutor {
     private void openQuestNew(Player p, String keepId, String keepName) {
         ConfirmationType type = DialogType.confirmation(
             (ActionButton) this.btn("&aСтворити", v -> this.sync(() -> {
-                String rawId = QuestNPC.clean(v.apply("id"), "");
-                String name = QuestNPC.clean(v.apply("name"), "");
+                String rawId = QuestNPC.clean(v.apply("questid"), "");
+                String name = QuestNPC.clean(v.apply("questname"), "");
                 try {
                     if (rawId.isEmpty() && name.isEmpty()) {
                         p.sendMessage(this.text("&cВведи назву квесту (id можна залишити порожнім)."));
@@ -1497,8 +1497,8 @@ TabExecutor {
             (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openQuestList(p))));
         p.showDialog((DialogLike) this.dialog("&5Новий квест",
             List.of(this.para("Достатньо написати назву. Порожнє id створиться з назви автоматично (українські літери перетворюються на латинські). Квест одразу отримає один етап «дійти до зони» у твоїй позиції - зміниш його далі.")),
-            List.of(this.line("name", "Назва квесту", keepName, 60),
-                    this.line("id", "id (необов'язково; a-z, 0-9, _ , -)", keepId, 32)),
+            List.of(this.line("questname", "Назва квесту", keepName, 60),
+                    this.line("questid", "id (необов'язково; a-z, 0-9, _ , -)", keepId, 32)),
             (DialogType) type));
     }
 
