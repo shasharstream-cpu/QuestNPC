@@ -112,8 +112,6 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Sound;
-import org.bukkit.advancement.Advancement;
-import org.bukkit.advancement.AdvancementProgress;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.command.Command;
@@ -154,8 +152,6 @@ extends JavaPlugin
 implements Listener,
 TabExecutor {
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacyAmpersand();
-    // як LEGACY, але ще розуміє hex-кольори у вигляді &#RRGGBB (для повідомлень у чаті)
-    private static final LegacyComponentSerializer HEX = LegacyComponentSerializer.builder().character('&').hexColors().build();
     private static final ClickCallback.Options CLICK_OPTS = (ClickCallback.Options)ClickCallback.Options.builder().uses(1).lifetime((TemporalAmount)Duration.ofMinutes(30L)).build();
     private static final int MAX_CHOICES = 5;
     private static final int MAX_TRADES = 18;
@@ -170,14 +166,11 @@ TabExecutor {
     private final Map<String, Quest> quests = new LinkedHashMap<String, Quest>();
     private final Map<UUID, Map<String, QState>> progress = new HashMap<UUID, Map<String, QState>>();
     private boolean progressDirty = false;
-    private NamespacedKey firstQuestKey;
-    private long questsMtime;
 
     public void onEnable() {
         PluginCommand qcmd;
         this.wandKey = new NamespacedKey((Plugin)this, "wand");
         this.npcKey = new NamespacedKey((Plugin)this, "npc_id");
-        this.registerAdvancement();
         this.getDataFolder().mkdirs();
         this.saveDefaultConfig();
         this.dataFile = new File(this.getDataFolder(), "npcs.yml");
@@ -188,7 +181,6 @@ TabExecutor {
         }
         this.load();
         this.loadQuests();
-        this.questsMtime = this.questsFile.lastModified();
         this.loadProgress();
         this.getServer().getPluginManager().registerEvents((Listener)this, (Plugin)this);
         PluginCommand cmd = this.getCommand("mizkoprav");
@@ -200,14 +192,6 @@ TabExecutor {
             qcmd.setExecutor((CommandExecutor)this);
         }
         this.getServer().getScheduler().runTaskTimer((Plugin)this, this::checkReach, 40L, 20L);
-        // ручні зміни quests.yml підхоплюються самі, без /mizkoprav reload
-        this.getServer().getScheduler().runTaskTimer((Plugin)this, () -> {
-            long m = this.questsFile.lastModified();
-            if (m != this.questsMtime) {
-                this.questsMtime = m;
-                this.loadQuests();
-            }
-        }, 100L, 60L);
         this.getServer().getScheduler().runTaskTimer((Plugin)this, () -> {
             if (this.progressDirty) {
                 this.saveProgress();
@@ -762,7 +746,7 @@ TabExecutor {
     private void complete(Player p, Quest q, QState st) {
         st.status = "DONE";
         this.saveProgress();
-        this.sendCompleteMessage(p, q);
+        p.sendMessage(this.text("&a&l\u041a\u0432\u0435\u0441\u0442 \u0432\u0438\u043a\u043e\u043d\u0430\u043d\u043e: &f" + q.name));
         p.playSound(p.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
         if (q.xp > 0) {
             p.giveExp(q.xp);
@@ -784,78 +768,6 @@ TabExecutor {
         }
         for (String cmd : q.commands) {
             Bukkit.dispatchCommand((CommandSender)Bukkit.getConsoleSender(), (String)cmd.replace("{player}", p.getName()));
-        }
-        this.grantFirstQuest(p);
-    }
-
-    /** Приватне повідомлення гравцю про виконаний квест (config.yml -> messages.quest-complete або поле квесту). */
-    private void sendCompleteMessage(Player p, Quest q) {
-        List<String> out;
-        if (!q.completeMessage.isBlank()) {
-            out = QuestNPC.lines(q.completeMessage);
-        } else {
-            if (!this.getConfig().getBoolean("messages.quest-complete.enabled", true)) {
-                return;
-            }
-            out = this.getConfig().isList("messages.quest-complete.lines")
-                ? this.getConfig().getStringList("messages.quest-complete.lines")
-                : List.of("&a&lКвест виконано: &f{quest}");
-        }
-        for (String line : out) {
-            String msg = line.replace("{player}", p.getName())
-                .replace("{quest}", q.name)
-                .replace("{xp}", String.valueOf(q.xp));
-            p.sendMessage(HEX.deserialize(this.papi(p, msg)));
-        }
-    }
-
-    /** Створює досягнення «Перший квест» (один раз; файл лишається в датапаку світу). */
-    private void registerAdvancement() {
-        this.firstQuestKey = new NamespacedKey((Plugin)this, "first_quest");
-        try {
-            if (Bukkit.getAdvancement(this.firstQuestKey) != null) {
-                return;
-            }
-            JsonObject icon = new JsonObject();
-            icon.addProperty("id", "minecraft:writable_book");
-            JsonObject title = new JsonObject();
-            title.addProperty("text", "Перший квест");
-            JsonObject desc = new JsonObject();
-            desc.addProperty("text", "Виконай свій перший квест");
-            JsonObject display = new JsonObject();
-            display.add("icon", icon);
-            display.add("title", title);
-            display.add("description", desc);
-            display.addProperty("frame", "task");
-            display.addProperty("show_toast", true);
-            display.addProperty("announce_to_chat", false);
-            JsonObject trigger = new JsonObject();
-            trigger.addProperty("trigger", "minecraft:impossible");
-            JsonObject criteria = new JsonObject();
-            criteria.add("done", trigger);
-            JsonObject root = new JsonObject();
-            root.addProperty("parent", "minecraft:adventure/root");
-            root.add("display", display);
-            root.add("criteria", criteria);
-            Bukkit.getUnsafe().loadAdvancement(this.firstQuestKey, root.toString());
-        } catch (Exception ex) {
-            this.getLogger().warning("Не вдалося створити досягнення: " + ex.getMessage());
-        }
-    }
-
-    /** Видає досягнення; Minecraft сам гарантує, що воно видається лише раз. */
-    private void grantFirstQuest(Player p) {
-        try {
-            Advancement adv = Bukkit.getAdvancement(this.firstQuestKey);
-            if (adv == null) {
-                return;
-            }
-            AdvancementProgress pr = p.getAdvancementProgress(adv);
-            if (!pr.isDone()) {
-                pr.awardCriteria("done");
-            }
-        } catch (Exception ex) {
-            this.getLogger().warning("Не вдалося видати досягнення: " + ex.getMessage());
         }
     }
 
@@ -1207,7 +1119,6 @@ TabExecutor {
             q.description = s.getString("description", "");
             q.repeatable = s.getBoolean("repeatable", false);
             q.turnIn = s.getBoolean("turn-in", false);
-            q.completeMessage = s.getString("complete-message", "");
             q.xp = s.getInt("rewards.xp", 0);
             q.items = s.getStringList("rewards.items");
             q.commands = s.getStringList("rewards.commands");
@@ -1433,9 +1344,6 @@ TabExecutor {
             y.set(b + "description", q.description);
             y.set(b + "repeatable", q.repeatable);
             y.set(b + "turn-in", q.turnIn);
-            if (!q.completeMessage.isEmpty()) {
-                y.set(b + "complete-message", q.completeMessage);
-            }
             List<Map<String, Object>> st = new ArrayList<>();
             for (Stage sg : q.stages) {
                 Map<String, Object> m = new LinkedHashMap<>();
@@ -1474,7 +1382,6 @@ TabExecutor {
         try {
             java.nio.file.Files.writeString(this.questsFile.toPath(), QUESTS_HEADER + y.saveToString(),
                 java.nio.charset.StandardCharsets.UTF_8);
-            this.questsMtime = this.questsFile.lastModified();
         } catch (IOException ex) {
             this.getLogger().severe("Не вдалося зберегти quests.yml: " + ex.getMessage());
         }
@@ -1519,38 +1426,79 @@ TabExecutor {
             (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Закрити", null), (int) 1)));
     }
 
+    /** Перетворює текст (у т.ч. українською) на id квесту: малі латинські літери, цифри, _ і -. */
+    private static String slug(String in) {
+        StringBuilder sb = new StringBuilder();
+        for (char ch : in.toLowerCase(Locale.ROOT).toCharArray()) {
+            String r = switch (ch) {
+                case 'а' -> "a"; case 'б' -> "b"; case 'в' -> "v"; case 'г' -> "h"; case 'ґ' -> "g";
+                case 'д' -> "d"; case 'е' -> "e"; case 'є' -> "ye"; case 'ж' -> "zh"; case 'з' -> "z";
+                case 'и' -> "y"; case 'і' -> "i"; case 'ї' -> "yi"; case 'й' -> "y"; case 'к' -> "k";
+                case 'л' -> "l"; case 'м' -> "m"; case 'н' -> "n"; case 'о' -> "o"; case 'п' -> "p";
+                case 'р' -> "r"; case 'с' -> "s"; case 'т' -> "t"; case 'у' -> "u"; case 'ф' -> "f";
+                case 'х' -> "kh"; case 'ц' -> "ts"; case 'ч' -> "ch"; case 'ш' -> "sh"; case 'щ' -> "shch";
+                case 'ю' -> "yu"; case 'я' -> "ya"; case 'ы' -> "y"; case 'э' -> "e"; case 'ё' -> "yo";
+                case 'ь', 'ъ', '\'', '’', 'ʼ' -> "";
+                default -> (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' ? String.valueOf(ch) : "_";
+            };
+            sb.append(r);
+        }
+        String s = sb.toString().replaceAll("_+", "_").replaceAll("^[_\\-]+|[_\\-]+$", "");
+        if (s.length() > 32) {
+            s = s.substring(0, 32).replaceAll("[_\\-]+$", "");
+        }
+        return s.isEmpty() ? "quest" : s;
+    }
+
     private void openQuestNew(Player p) {
+        this.openQuestNew(p, "", "");
+    }
+
+    private void openQuestNew(Player p, String keepId, String keepName) {
         ConfirmationType type = DialogType.confirmation(
             (ActionButton) this.btn("&aСтворити", v -> this.sync(() -> {
-                String id = QuestNPC.clean(v.apply("id"), "").toLowerCase(Locale.ROOT);
-                if (!id.matches("[a-z0-9_\\-]+")) {
-                    p.sendMessage(this.text("&cid: лише малі латинські літери, цифри, _ і -"));
-                    this.openQuestNew(p);
-                    return;
+                String rawId = QuestNPC.clean(v.apply("id"), "");
+                String name = QuestNPC.clean(v.apply("name"), "");
+                try {
+                    if (rawId.isEmpty() && name.isEmpty()) {
+                        p.sendMessage(this.text("&cВведи назву квесту (id можна залишити порожнім)."));
+                        this.openQuestNew(p, rawId, name);
+                        return;
+                    }
+                    String base = QuestNPC.slug(rawId.isEmpty() ? name : rawId);
+                    String id = base;
+                    if (rawId.isEmpty()) {
+                        int i = 2;
+                        while (this.quests.containsKey(id)) {
+                            id = base + "_" + i++;
+                        }
+                    } else if (this.quests.containsKey(id)) {
+                        p.sendMessage(this.text("&cКвест з id &f" + id + "&c уже є. Обери інший id."));
+                        this.openQuestNew(p, rawId, name);
+                        return;
+                    }
+                    Quest q = new Quest();
+                    q.id = id;
+                    q.name = name.isEmpty() ? id : name;
+                    Stage sg = new Stage();
+                    sg.type = "reach";
+                    sg.text = "Дійди до зони";
+                    this.fillHere(sg, p);
+                    q.stages.add(sg);
+                    this.quests.put(id, q);
+                    this.saveQuests();
+                    p.sendMessage(this.text("&aКвест створено. id: &f" + id + "&a. Додай етапи й нагороди."));
+                    this.openQuestEditor(p, q);
+                } catch (RuntimeException ex) {
+                    this.getLogger().log(java.util.logging.Level.SEVERE, "Не вдалося створити квест", ex);
+                    p.sendMessage(this.text("&cПомилка створення квесту: &f" + ex));
                 }
-                if (this.quests.containsKey(id)) {
-                    p.sendMessage(this.text("&cКвест з таким id уже є."));
-                    this.openQuestNew(p);
-                    return;
-                }
-                Quest q = new Quest();
-                q.id = id;
-                q.name = QuestNPC.clean(v.apply("name"), id);
-                Stage sg = new Stage();
-                sg.type = "reach";
-                sg.text = "Дійди до зони";
-                this.fillHere(sg, p);
-                q.stages.add(sg);
-                this.quests.put(id, q);
-                this.saveQuests();
-                p.sendMessage(this.text("&aКвест створено. Додай етапи й нагороди."));
-                this.openQuestEditor(p, q);
             })),
             (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openQuestList(p))));
         p.showDialog((DialogLike) this.dialog("&5Новий квест",
-            List.of(this.para("Новий квест одразу отримує один етап «дійти до зони» у твоїй позиції - зміниш його далі.")),
-            List.of(this.line("id", "id (a-z, 0-9, _ , -)", "", 32),
-                    this.line("name", "Назва квесту", "", 60)),
+            List.of(this.para("Достатньо написати назву. Порожнє id створиться з назви автоматично (українські літери перетворюються на латинські). Квест одразу отримає один етап «дійти до зони» у твоїй позиції - зміниш його далі.")),
+            List.of(this.line("name", "Назва квесту", keepName, 60),
+                    this.line("id", "id (необов'язково; a-z, 0-9, _ , -)", keepId, 32)),
             (DialogType) type));
     }
 
@@ -1576,7 +1524,6 @@ TabExecutor {
             cmds.add(c.startsWith("/") ? c.substring(1) : c);
         }
         q.commands = cmds;
-        q.completeMessage = String.join("\n", QuestNPC.lines(v.apply("message")));
     }
 
     private void openQuestEditor(Player p, Quest q) {
@@ -1588,8 +1535,6 @@ TabExecutor {
             String.join("\n", q.items), 500));
         inputs.add(this.block("commands", "Нагорода: команди від консолі ({player} = нік, по одній в рядок)",
             String.join("\n", q.commands), 500));
-        inputs.add(this.block("message", "Повідомлення про виконання (&-коди, &#RRGGBB, {player} {quest} {xp}; порожньо = з config.yml)",
-            q.completeMessage, 500));
         List<ActionButton> buttons = new ArrayList<>();
         buttons.add(this.btn("&aЗберегти", v -> this.sync(() -> {
             this.applyQuestFields(p, q, v);
@@ -2169,7 +2114,6 @@ TabExecutor {
         String description = "";
         boolean repeatable;
         boolean turnIn;
-        String completeMessage = "";
         final List<Stage> stages = new ArrayList<Stage>();
         int xp;
         List<String> items = new ArrayList<String>();
