@@ -166,6 +166,12 @@ TabExecutor {
     private final Map<String, Quest> quests = new LinkedHashMap<String, Quest>();
     private final Map<UUID, Map<String, QState>> progress = new HashMap<UUID, Map<String, QState>>();
     private boolean progressDirty = false;
+    private boolean uidGenerated = false;
+    private final Map<UUID, Map<String, Long>> choiceUses = new HashMap<>();
+    private final Map<UUID, String> tracked = new HashMap<>();
+    private final java.util.Set<UUID> hudOff = new java.util.HashSet<>();
+    private final Map<UUID, net.kyori.adventure.bossbar.BossBar> bars = new HashMap<>();
+    private final Map<String, ItemStack> stackCache = new HashMap<>();
 
     public void onEnable() {
         PluginCommand qcmd;
@@ -180,6 +186,9 @@ TabExecutor {
             this.saveResource("quests.yml", false);
         }
         this.load();
+        if (this.uidGenerated) {
+            this.save();
+        }
         this.loadQuests();
         this.loadProgress();
         this.getServer().getPluginManager().registerEvents((Listener)this, (Plugin)this);
@@ -192,6 +201,7 @@ TabExecutor {
             qcmd.setExecutor((CommandExecutor)this);
         }
         this.getServer().getScheduler().runTaskTimer((Plugin)this, this::checkReach, 40L, 20L);
+        this.getServer().getScheduler().runTaskTimer((Plugin)this, this::updateTrackers, 40L, 20L);
         this.getServer().getScheduler().runTaskTimer((Plugin)this, () -> {
             if (this.progressDirty) {
                 this.saveProgress();
@@ -200,6 +210,9 @@ TabExecutor {
     }
 
     public void onDisable() {
+        for (Player pl : Bukkit.getOnlinePlayers()) {
+            this.hideTracker(pl);
+        }
         for (UUID id : new ArrayList<>(this.bubbles.keySet())) {
             this.removeBubble(id);
         }
@@ -399,8 +412,10 @@ TabExecutor {
                 this.openSettings(p, n);
             }
         } else {
-            this.questsOnTalk(p, n.id);
-            if (this.useHub(p, n)) {
+            String reply = this.questsOnTalk(p, n.id);
+            if (reply != null) {
+                this.openReply(p, n, reply);
+            } else if (this.useHub(p, n)) {
                 this.openHub(p, n);
             } else {
                 this.openNode(p, n, n.root);
@@ -411,7 +426,7 @@ TabExecutor {
     private void openNode(Player p, Npc n, Node node) {
         ArrayList<ActionButton> buttons = new ArrayList<ActionButton>();
         for (Choice c : node.choices) {
-            if (!this.condOk(p, c.cond)) continue;
+            if (!this.condOk(p, c.cond) || !this.choiceAvailable(p, c)) continue;
             buttons.add(this.btn("&f" + c.label, v -> this.sync(() -> this.runChoice(p, n, node, c))));
         }
         if (node.parent != null) {
@@ -426,6 +441,7 @@ TabExecutor {
     }
 
     private void runChoice(Player p, Npc n, Node node, Choice c) {
+        this.markChoiceUsed(p, c);
         String a;
         String string = a = c.action == null ? "" : c.action.trim().toLowerCase(Locale.ROOT);
         if (a.isEmpty()) {
@@ -460,6 +476,7 @@ TabExecutor {
             int i;
             String t = part.trim().toLowerCase(Locale.ROOT);
             if (t.isEmpty()) continue;
+            if (t.equals("once") || t.startsWith("cd:")) continue;
             boolean negate = t.startsWith("!");
             if (negate) {
                 t = t.substring(1);
@@ -475,7 +492,7 @@ TabExecutor {
         QState st = this.stateOf(p, qid);
         return switch (kind) {
             case "new" -> {
-                if (q != null && (st == null || "DONE".equals(st.status) && q.repeatable)) {
+                if (q != null && (st == null || "DONE".equals(st.status) && q.repeatable && this.cooldownLeft(q, st) == 0L)) {
                     yield true;
                 }
                 yield false;
@@ -566,7 +583,7 @@ TabExecutor {
             Choice c = i < old.size() ? (Choice)old.get(i) : null;
             inputs.add(this.line("label" + i, "\u0412\u0430\u0440\u0456\u0430\u043d\u0442 " + (i + 1) + ": \u0442\u0435\u043a\u0441\u0442 \u043a\u043d\u043e\u043f\u043a\u0438 (\u043f\u043e\u0440\u043e\u0436\u043d\u044c\u043e = \u043d\u0435\u043c\u0430)", c == null ? "" : c.label, 40));
             inputs.add(this.line("act" + i, "   \u0434\u0456\u044f: trade / close / quest:id / turnin:id", c == null ? "" : c.action, 60));
-            inputs.add(this.line("cond" + i, "   \u0443\u043c\u043e\u0432\u0430: new:id, active:id, ready:id, done:id (!=\u043d\u0430\u0432\u043f\u0430\u043a\u0438)", c == null ? "" : c.cond, 80));
+            inputs.add(this.line("cond" + i, "   \u0443\u043c\u043e\u0432\u0430: new:id, active:id, ready:id, done:id (!=навпаки), once = одноразова, cd:10m = кулдаун", c == null ? "" : c.cond, 80));
         }
         ArrayList<ActionButton> buttons = new ArrayList<ActionButton>();
         buttons.add(this.btn("&a\u0417\u0431\u0435\u0440\u0435\u0433\u0442\u0438", v -> this.sync(() -> {
@@ -699,11 +716,16 @@ TabExecutor {
             return false;
         }
         QState st = this.stateOf(p, qid);
+        if (st != null && "DONE".equals(st.status) && q.repeatable && this.cooldownLeft(q, st) > 0L) {
+            p.sendMessage(this.text("&eЦей квест можна взяти знову через &f" + QuestNPC.fmtDuration(this.cooldownLeft(q, st) / 1000L + 1L)));
+            return false;
+        }
         if (!(st == null || "DONE".equals(st.status) && q.repeatable)) {
             p.sendMessage(this.text("DONE".equals(st.status) ? "&7\u0426\u0435\u0439 \u043a\u0432\u0435\u0441\u0442 \u0443\u0436\u0435 \u0432\u0438\u043a\u043e\u043d\u0430\u043d\u043e." : "&7\u0422\u0438 \u0432\u0436\u0435 \u0432\u0437\u044f\u0432 \u0446\u0435\u0439 \u043a\u0432\u0435\u0441\u0442."));
             return false;
         }
         this.progress.computeIfAbsent(p.getUniqueId(), k -> new LinkedHashMap()).put(qid, new QState());
+        this.tracked.put(p.getUniqueId(), qid);
         this.saveProgress();
         p.sendMessage(this.text("&6\u041a\u0432\u0435\u0441\u0442 \u0432\u0437\u044f\u0442\u043e: &f" + q.name));
         if (!q.stages.isEmpty()) {
@@ -745,6 +767,7 @@ TabExecutor {
 
     private void complete(Player p, Quest q, QState st) {
         st.status = "DONE";
+        st.doneAt = System.currentTimeMillis();
         this.saveProgress();
         p.sendMessage(this.text("&a&l\u041a\u0432\u0435\u0441\u0442 \u0432\u0438\u043a\u043e\u043d\u0430\u043d\u043e: &f" + q.name));
         p.playSound(p.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
@@ -766,36 +789,89 @@ TabExecutor {
             }
             p.getInventory().addItem(new ItemStack[]{new ItemStack(m, amount)}).values().forEach(rest -> p.getWorld().dropItemNaturally(p.getLocation(), rest));
         }
+        for (String enc : q.stacks) {
+            try {
+                ItemStack reward = this.decode(enc);
+                p.getInventory().addItem(new ItemStack[]{reward}).values().forEach(rest -> p.getWorld().dropItemNaturally(p.getLocation(), rest));
+            } catch (RuntimeException ex) {
+                this.getLogger().warning("Не вдалося видати предмет-нагороду квесту " + q.id + ": " + ex.getMessage());
+            }
+        }
         for (String cmd : q.commands) {
             Bukkit.dispatchCommand((CommandSender)Bukkit.getConsoleSender(), (String)cmd.replace("{player}", p.getName()));
         }
     }
 
-    private void questsOnTalk(Player p, int npcId) {
+    /** Повертає текст відповіді NPC, якщо етап, що щойно виконався (або не виконався), її має. */
+    private String questsOnTalk(Player p, int npcId) {
         Map<String, QState> m = this.progress.get(p.getUniqueId());
         if (m == null) {
-            return;
+            return null;
         }
+        String reply = null;
         for (Map.Entry<String, QState> en : new ArrayList<Map.Entry<String, QState>>(m.entrySet())) {
             QState st = en.getValue();
             Quest q = this.quests.get(en.getKey());
-            if (q == null || !"ACTIVE".equals(st.status) || st.stage >= q.stages.size()) continue;
+            if (q == null || !"ACTIVE".equals(st.status) || st.stage >= q.stages.size()) {
+                continue;
+            }
             Stage sg = q.stages.get(st.stage);
-            if (sg.npc != npcId) continue;
+            if (sg.npc != npcId) {
+                continue;
+            }
             if (sg.type.equals("talk")) {
                 this.advance(p, q, st);
+                if (reply == null && !sg.reply.isBlank()) {
+                    reply = sg.reply;
+                }
                 continue;
             }
-            if (!sg.type.equals("deliver")) continue;
-            ItemStack need = new ItemStack(sg.material, sg.amount);
-            if (p.getInventory().containsAtLeast(new ItemStack(sg.material), sg.amount)) {
-                p.getInventory().removeItem(new ItemStack[]{need});
-                p.sendMessage(this.text("&7\u0422\u0438 \u0432\u0456\u0434\u0434\u0430\u0432: &f" + sg.amount + " x " + sg.material.name()));
-                this.advance(p, q, st);
+            if (sg.type.equals("deliver") && sg.material != null) {
+                ItemStack need = new ItemStack(sg.material, sg.amount);
+                if (p.getInventory().containsAtLeast(new ItemStack(sg.material), sg.amount)) {
+                    p.getInventory().removeItem(new ItemStack[]{need});
+                    p.sendMessage(this.text("&7Ти віддав: &f" + sg.amount + " x " + sg.material.name()));
+                    this.advance(p, q, st);
+                    if (reply == null && !sg.reply.isBlank()) {
+                        reply = sg.reply;
+                    }
+                } else if (!sg.replyFail.isBlank()) {
+                    if (reply == null) {
+                        reply = sg.replyFail;
+                    }
+                } else {
+                    p.sendMessage(this.text("&eПотрібно принести: &f" + sg.amount + " x " + sg.material.name()));
+                }
                 continue;
             }
-            p.sendMessage(this.text("&e\u041f\u043e\u0442\u0440\u0456\u0431\u043d\u043e \u043f\u0440\u0438\u043d\u0435\u0441\u0442\u0438: &f" + sg.amount + " x " + sg.material.name()));
+            if (sg.type.equals("item")) {
+                ItemStack need;
+                try {
+                    need = this.stackOf(sg.stack);
+                } catch (RuntimeException ex) {
+                    continue;
+                }
+                ItemStack one = need.clone();
+                one.setAmount(1);
+                if (p.getInventory().containsAtLeast(one, sg.amount)) {
+                    ItemStack take = need.clone();
+                    take.setAmount(sg.amount);
+                    p.getInventory().removeItem(new ItemStack[]{take});
+                    p.sendMessage(this.text("&7Ти віддав: &f" + sg.amount + " x " + this.stackLabel(sg)));
+                    this.advance(p, q, st);
+                    if (reply == null && !sg.reply.isBlank()) {
+                        reply = sg.reply;
+                    }
+                } else if (!sg.replyFail.isBlank()) {
+                    if (reply == null) {
+                        reply = sg.replyFail;
+                    }
+                } else {
+                    p.sendMessage(this.text("&eПотрібно принести: &f" + sg.amount + " x " + this.stackLabel(sg)));
+                }
+            }
         }
+        return reply;
     }
 
     @EventHandler
@@ -878,6 +954,9 @@ TabExecutor {
             case "deliver": {
                 return base + " &7(" + sg.amount + " x " + sg.material.name() + ", NPC #" + sg.npc + ")";
             }
+            case "item": {
+                return base + " &7(" + sg.amount + " x " + this.stackLabel(sg) + ", NPC #" + sg.npc + ")";
+            }
             case "talk": {
                 return base + " &7(NPC #" + sg.npc + ")";
             }
@@ -895,24 +974,6 @@ TabExecutor {
         return base;
     }
 
-    private void openJournal(Player p) {
-        ArrayList<DialogBody> body = new ArrayList<DialogBody>();
-        Map<String, QState> m = this.progress.get(p.getUniqueId());
-        if (m != null) {
-            for (Map.Entry<String, QState> en : m.entrySet()) {
-                QState st = en.getValue();
-                Quest q = this.quests.get(en.getKey());
-                if (q == null || "DONE".equals(st.status)) continue;
-                String desc = q.description.isBlank() ? "" : "\n&7" + q.description;
-                body.add(this.para("&6&l" + q.name + desc + "\n" + this.describe(p, q, st)));
-            }
-        }
-        if (body.isEmpty()) {
-            body.add(this.para("&7\u0410\u043a\u0442\u0438\u0432\u043d\u0438\u0445 \u043a\u0432\u0435\u0441\u0442\u0456\u0432 \u043d\u0435\u043c\u0430\u0454. \u041f\u043e\u0433\u043e\u0432\u043e\u0440\u0438 \u0437 \u0436\u0438\u0442\u0435\u043b\u044f\u043c\u0438."));
-        }
-        p.showDialog((DialogLike)this.dialog("&6\u0416\u0443\u0440\u043d\u0430\u043b \u043a\u0432\u0435\u0441\u0442\u0456\u0432", body, List.of(), (DialogType)DialogType.notice((ActionButton)this.btn("&7\u0417\u0430\u043a\u0440\u0438\u0442\u0438", null))));
-    }
-
     @EventHandler
     public void onDamage(EntityDamageEvent e) {
         if (this.npcIdOf(e.getEntity()) != null) {
@@ -924,6 +985,7 @@ TabExecutor {
     public void onQuit(PlayerQuitEvent e) {
         this.lastUse.remove(e.getPlayer().getUniqueId());
         this.removeBubble(e.getPlayer().getUniqueId());
+        this.hideTracker(e.getPlayer());
     }
 
     private String encode(ItemStack item) {
@@ -1031,6 +1093,7 @@ TabExecutor {
             co.addProperty("label", c.label);
             co.addProperty("action", c.action == null ? "" : c.action);
             co.addProperty("cond", c.cond == null ? "" : c.cond);
+            co.addProperty("uid", c.uid);
             co.add("node", (JsonElement)this.nodeToJson(c.next));
             arr.add((JsonElement)co);
         }
@@ -1046,7 +1109,13 @@ TabExecutor {
                 String label = co.get("label").getAsString();
                 String action = co.has("action") ? co.get("action").getAsString() : "";
                 String cond = co.has("cond") ? co.get("cond").getAsString() : "";
-                node.choices.add(new Choice(label, action, cond, this.nodeFromJson(co.getAsJsonObject("node"), node, label, depth + 1)));
+                Choice ch = new Choice(label, action, cond, this.nodeFromJson(co.getAsJsonObject("node"), node, label, depth + 1));
+                if (co.has("uid")) {
+                    ch.uid = co.get("uid").getAsString();
+                } else {
+                    this.uidGenerated = true;
+                }
+                node.choices.add(ch);
             }
         }
         return node;
@@ -1119,8 +1188,10 @@ TabExecutor {
             q.description = s.getString("description", "");
             q.repeatable = s.getBoolean("repeatable", false);
             q.turnIn = s.getBoolean("turn-in", false);
+            q.cooldown = Math.max(0L, s.getLong("cooldown", 0L));
             q.xp = s.getInt("rewards.xp", 0);
             q.items = s.getStringList("rewards.items");
+            q.stacks = new ArrayList<>(s.getStringList("rewards.stacks"));
             q.commands = s.getStringList("rewards.commands");
             boolean valid = true;
             int index = 0;
@@ -1129,6 +1200,8 @@ TabExecutor {
                 Stage sg = new Stage();
                 sg.type = QuestNPC.ms(m, "type", "").toLowerCase(Locale.ROOT);
                 sg.text = QuestNPC.ms(m, "text", "");
+                sg.reply = QuestNPC.ms(m, "reply", "");
+                sg.replyFail = QuestNPC.ms(m, "reply-fail", "");
                 switch (sg.type) {
                     case "reach": {
                         sg.world = QuestNPC.ms(m, "world", "world");
@@ -1160,6 +1233,18 @@ TabExecutor {
                         sg.npc = (int)QuestNPC.md(m, "npc", -1.0);
                         break;
                     }
+                    case "item": {
+                        sg.stack = QuestNPC.ms(m, "stack", "");
+                        sg.amount = (int)QuestNPC.md(m, "amount", 1.0);
+                        sg.npc = (int)QuestNPC.md(m, "npc", -1.0);
+                        try {
+                            this.decode(sg.stack);
+                        } catch (RuntimeException ex2) {
+                            this.getLogger().warning("Квест " + id + ", етап " + index + ": пошкоджений предмет (stack).");
+                            valid = false;
+                        }
+                        break;
+                    }
                     case "talk": {
                         sg.npc = (int)QuestNPC.md(m, "npc", -1.0);
                         break;
@@ -1186,6 +1271,36 @@ TabExecutor {
             return;
         }
         YamlConfiguration y = YamlConfiguration.loadConfiguration((File)this.progressFile);
+        this.choiceUses.clear();
+        this.tracked.clear();
+        this.hudOff.clear();
+        ConfigurationSection us = y.getConfigurationSection("uses");
+        if (us != null) {
+            for (String u : us.getKeys(false)) {
+                try {
+                    ConfigurationSection uc = us.getConfigurationSection(u);
+                    if (uc == null) continue;
+                    Map<String, Long> mm = new HashMap<>();
+                    for (String k : uc.getKeys(false)) {
+                        mm.put(k, uc.getLong(k));
+                    }
+                    this.choiceUses.put(UUID.fromString(u), mm);
+                } catch (IllegalArgumentException ignored) { }
+            }
+        }
+        ConfigurationSection ts = y.getConfigurationSection("tracked");
+        if (ts != null) {
+            for (String u : ts.getKeys(false)) {
+                try {
+                    this.tracked.put(UUID.fromString(u), ts.getString(u, ""));
+                } catch (IllegalArgumentException ignored) { }
+            }
+        }
+        for (String u : y.getStringList("hud-off")) {
+            try {
+                this.hudOff.add(UUID.fromString(u));
+            } catch (IllegalArgumentException ignored) { }
+        }
         ConfigurationSection players = y.getConfigurationSection("players");
         if (players == null) {
             return;
@@ -1203,6 +1318,7 @@ TabExecutor {
                     st.status = qs.getString("status", "ACTIVE");
                     st.stage = qs.getInt("stage", 0);
                     st.count = qs.getInt("count", 0);
+                    st.doneAt = qs.getLong("doneAt", 0L);
                     map.put(qid, st);
                 }
                 this.progress.put(uuid, map);
@@ -1220,8 +1336,18 @@ TabExecutor {
                 y.set(b + "status", (Object)qe.getValue().status);
                 y.set(b + "stage", (Object)qe.getValue().stage);
                 y.set(b + "count", (Object)qe.getValue().count);
+                y.set(b + "doneAt", (Object)qe.getValue().doneAt);
             }
         }
+        for (Map.Entry<UUID, Map<String, Long>> ue : this.choiceUses.entrySet()) {
+            for (Map.Entry<String, Long> use : ue.getValue().entrySet()) {
+                y.set("uses." + ue.getKey() + "." + use.getKey(), use.getValue());
+            }
+        }
+        for (Map.Entry<UUID, String> te : this.tracked.entrySet()) {
+            y.set("tracked." + te.getKey(), te.getValue());
+        }
+        y.set("hud-off", this.hudOff.stream().map(UUID::toString).toList());
         try {
             y.save(this.progressFile);
         }
@@ -1344,11 +1470,18 @@ TabExecutor {
             y.set(b + "description", q.description);
             y.set(b + "repeatable", q.repeatable);
             y.set(b + "turn-in", q.turnIn);
+            y.set(b + "cooldown", q.cooldown);
             List<Map<String, Object>> st = new ArrayList<>();
             for (Stage sg : q.stages) {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("type", sg.type);
                 m.put("text", sg.text);
+                if (!sg.reply.isBlank()) {
+                    m.put("reply", sg.reply);
+                }
+                if (!sg.replyFail.isBlank()) {
+                    m.put("reply-fail", sg.replyFail);
+                }
                 switch (sg.type) {
                     case "reach" -> {
                         m.put("world", sg.world);
@@ -1369,6 +1502,11 @@ TabExecutor {
                         m.put("amount", sg.amount);
                         m.put("npc", sg.npc);
                     }
+                    case "item" -> {
+                        m.put("stack", sg.stack);
+                        m.put("amount", sg.amount);
+                        m.put("npc", sg.npc);
+                    }
                     case "talk" -> m.put("npc", sg.npc);
                     default -> { }
                 }
@@ -1377,6 +1515,7 @@ TabExecutor {
             y.set(b + "stages", st);
             y.set(b + "rewards.xp", q.xp);
             y.set(b + "rewards.items", q.items);
+            y.set(b + "rewards.stacks", q.stacks);
             y.set(b + "rewards.commands", q.commands);
         }
         try {
@@ -1409,6 +1548,7 @@ TabExecutor {
             case "reach" -> "Дійти до зони";
             case "kill" -> "Вбити";
             case "deliver" -> "Принести предмети";
+            case "item" -> "Принести предмет з руки";
             case "talk" -> "Поговорити з NPC";
             default -> type;
         };
@@ -1510,6 +1650,7 @@ TabExecutor {
         } catch (NumberFormatException ex) {
             p.sendMessage(this.text("&cДосвід має бути цілим числом - залишено попереднє значення."));
         }
+        q.cooldown = QuestNPC.parseDuration(v.apply("cooldown"));
         List<String> items = new ArrayList<>();
         for (String entry : QuestNPC.lines(v.apply("items"))) {
             if (Material.matchMaterial(entry.split(":")[0].trim()) == null) {
@@ -1531,6 +1672,7 @@ TabExecutor {
         inputs.add(this.line("name", "Назва квесту", q.name, 60));
         inputs.add(this.block("description", "Опис", q.description, 500));
         inputs.add(this.line("xp", "Нагорода: досвід", String.valueOf(q.xp), 7));
+        inputs.add(this.line("cooldown", "Кулдаун повтору (напр. 30m, 12h, 1d; 0 = без; працює для повторюваних)", q.cooldown > 0L ? q.cooldown + "s" : "0", 12));
         inputs.add(this.block("items", "Нагорода: предмети (МАТЕРІАЛ:кількість, кожен з нового рядка)",
             String.join("\n", q.items), 500));
         inputs.add(this.block("commands", "Нагорода: команди від консолі ({player} = нік, по одній в рядок)",
@@ -1547,6 +1689,26 @@ TabExecutor {
             this.saveQuests();
             this.openStages(p, q);
         })));
+        buttons.add(this.btn("&dНагорода: предмет з руки (+) &7[" + q.stacks.size() + "]", v -> this.sync(() -> {
+            this.applyQuestFields(p, q, v);
+            ItemStack held = p.getInventory().getItemInMainHand();
+            if (held.getType().isAir()) {
+                p.sendMessage(this.text("&cВізьми в основну руку предмет, який хочеш додати в нагороду."));
+            } else {
+                q.stacks.add(this.encode(held.clone()));
+                p.sendMessage(this.text("&aПредмет додано в нагороду (зачарування й назва збережені): &f" + held.getType().name() + " x" + held.getAmount()));
+            }
+            this.saveQuests();
+            this.openQuestEditor(p, q);
+        })));
+        if (!q.stacks.isEmpty()) {
+            buttons.add(this.btn("&cОчистити предмети з руки", v -> this.sync(() -> {
+                this.applyQuestFields(p, q, v);
+                q.stacks.clear();
+                this.saveQuests();
+                this.openQuestEditor(p, q);
+            })));
+        }
         buttons.add(this.btn("Повторюваний: " + (q.repeatable ? "&aтак" : "&cні"), v -> this.sync(() -> {
             this.applyQuestFields(p, q, v);
             q.repeatable = !q.repeatable;
@@ -1588,7 +1750,7 @@ TabExecutor {
             buttons.add(this.btn((i + 1) + ". " + QuestNPC.stageLabel(sg.type) + ": &7" + sg.text,
                 v -> this.sync(() -> this.openStageEditor(p, q, idx))));
         }
-        for (String t : new String[]{"reach", "kill", "deliver", "talk"}) {
+        for (String t : new String[]{"reach", "kill", "deliver", "item", "talk"}) {
             buttons.add(this.btn("&a+ " + QuestNPC.stageLabel(t), v -> this.sync(() -> {
                 Stage sg = new Stage();
                 sg.type = t;
@@ -1599,6 +1761,16 @@ TabExecutor {
                     sg.entity = EntityType.ZOMBIE;
                 } else if (t.equals("deliver")) {
                     sg.material = Material.STONE;
+                } else if (t.equals("item")) {
+                    ItemStack held = p.getInventory().getItemInMainHand();
+                    if (held.getType().isAir()) {
+                        p.sendMessage(this.text("&cВізьми в руку предмет, який треба принести NPC, і натисни ще раз."));
+                        this.openStages(p, q);
+                        return;
+                    }
+                    sg.stack = this.encode(held.clone());
+                    sg.amount = held.getAmount();
+                    sg.material = held.getType();
                 }
                 q.stages.add(sg);
                 this.saveQuests();
@@ -1659,6 +1831,13 @@ TabExecutor {
                         p.sendMessage(this.text("&eУвага: NPC #" + sg.npc + " не існує."));
                     }
                 }
+                case "item" -> {
+                    sg.amount = Math.max(1, Integer.parseInt(QuestNPC.clean(v.apply("amount"), "1")));
+                    sg.npc = Integer.parseInt(QuestNPC.clean(v.apply("npc"), "-1"));
+                    if (!this.npcs.containsKey(sg.npc)) {
+                        p.sendMessage(this.text("&eУвага: NPC #" + sg.npc + " не існує."));
+                    }
+                }
                 case "talk" -> {
                     sg.npc = Integer.parseInt(QuestNPC.clean(v.apply("npc"), "-1"));
                     if (!this.npcs.containsKey(sg.npc)) {
@@ -1666,6 +1845,10 @@ TabExecutor {
                     }
                 }
                 default -> { }
+            }
+            if (sg.type.equals("deliver") || sg.type.equals("item") || sg.type.equals("talk")) {
+                sg.reply = QuestNPC.clean(v.apply("reply"), "");
+                sg.replyFail = QuestNPC.clean(v.apply("replyfail"), "");
             }
             sg.text = text;
             return true;
@@ -1698,8 +1881,18 @@ TabExecutor {
                 inputs.add(this.line("amount", "Кількість", String.valueOf(sg.amount), 5));
                 inputs.add(this.line("npc", "№ NPC, якому віддати", String.valueOf(sg.npc), 5));
             }
+            case "item" -> {
+                inputs.add(this.line("amount", "Кількість", String.valueOf(sg.amount), 5));
+                inputs.add(this.line("npc", "№ NPC, якому віддати", String.valueOf(sg.npc), 5));
+            }
             case "talk" -> inputs.add(this.line("npc", "№ NPC, з яким поговорити", String.valueOf(sg.npc), 5));
             default -> { }
+        }
+        if (sg.type.equals("deliver") || sg.type.equals("item") || sg.type.equals("talk")) {
+            inputs.add(this.block("reply", "Відповідь NPC після виконання (порожньо = звичайне меню)", sg.reply, 300));
+            if (!sg.type.equals("talk")) {
+                inputs.add(this.block("replyfail", "Відповідь NPC, якщо предмета немає (порожньо = лише повідомлення в чаті)", sg.replyFail, 300));
+            }
         }
         List<ActionButton> buttons = new ArrayList<>();
         buttons.add(this.btn("&aЗберегти", v -> this.sync(() -> {
@@ -1713,6 +1906,22 @@ TabExecutor {
             buttons.add(this.btn("Взяти мою позицію", v -> this.sync(() -> {
                 this.applyStage(p, sg, v);
                 this.fillHere(sg, p);
+                this.saveQuests();
+                this.openStageEditor(p, q, idx);
+            })));
+        }
+        if (sg.type.equals("item")) {
+            buttons.add(this.btn("&dЗамінити предмет на той, що в руці", v -> this.sync(() -> {
+                this.applyStage(p, sg, v);
+                ItemStack held = p.getInventory().getItemInMainHand();
+                if (held.getType().isAir()) {
+                    p.sendMessage(this.text("&cВізьми предмет в основну руку."));
+                } else {
+                    sg.stack = this.encode(held.clone());
+                    sg.amount = held.getAmount();
+                    sg.material = held.getType();
+                    p.sendMessage(this.text("&aПредмет оновлено: &f" + held.getType().name() + " x" + held.getAmount()));
+                }
                 this.saveQuests();
                 this.openStageEditor(p, q, idx);
             })));
@@ -1885,7 +2094,7 @@ TabExecutor {
         }
         return switch (st.status) {
             case "READY" -> "&6[Здати] &f";
-            case "DONE" -> q.repeatable ? "&a[Знову] &f" : "&7[Виконано] &7";
+            case "DONE" -> q.repeatable ? (this.cooldownLeft(q, st) > 0L ? "&7[Кулдаун " + QuestNPC.fmtDuration(this.cooldownLeft(q, st) / 1000L + 1L) + "] &7" : "&a[Знову] &f") : "&7[Виконано] &7";
             default -> "&e[У процесі] &f";
         };
     }
@@ -1927,7 +2136,7 @@ TabExecutor {
 
     private void openQuestDetail(Player p, Npc n, Quest q) {
         QState st = this.stateOf(p, q.id);
-        boolean fresh = st == null || "DONE".equals(st.status) && q.repeatable;
+        boolean fresh = st == null || "DONE".equals(st.status) && q.repeatable && this.cooldownLeft(q, st) == 0L;
         List<DialogBody> body = new ArrayList<>();
         if (!q.description.isBlank()) {
             body.add(DialogBody.plainMessage((Component) this.fmt(q.description, p)));
@@ -1944,12 +2153,26 @@ TabExecutor {
             }
         }
         body.add(DialogBody.plainMessage((Component) this.fmt(sb.toString(), p)));
+        if (q.repeatable && q.cooldown > 0L) {
+            long left = this.cooldownLeft(q, st);
+            body.add(DialogBody.plainMessage((Component) this.fmt(left > 0L
+                ? "&eМожна взяти знову через: &f" + QuestNPC.fmtDuration(left / 1000L + 1L)
+                : "&7Повторюваний, кулдаун: &f" + QuestNPC.fmtDuration(q.cooldown), p)));
+        }
         List<String> rewards = new ArrayList<>();
         if (q.xp > 0) {
             rewards.add(q.xp + " досвіду");
         }
         for (String it : q.items) {
             rewards.add(it.replace(":", " x"));
+        }
+        for (String enc : q.stacks) {
+            try {
+                ItemStack st0 = this.decode(enc);
+                rewards.add(st0.getAmount() + " x " + st0.getType().name() + (st0.hasItemMeta() ? " (особливий)" : ""));
+            } catch (RuntimeException ex) {
+                rewards.add("предмет (помилка читання)");
+            }
         }
         if (!rewards.isEmpty()) {
             body.add(DialogBody.plainMessage((Component) this.fmt("&6Нагорода: &f" + String.join(", ", rewards), p)));
@@ -2037,6 +2260,276 @@ TabExecutor {
             (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openSettings(p, n))), (int) 1)));
     }
 
+    // ======================= КУЛДАУНИ, ОДНОРАЗОВІ ФРАЗИ, ПРЕДМЕТ З РУКИ =======================
+
+    private static final java.util.regex.Pattern DUR = java.util.regex.Pattern.compile("^([0-9]+(?:\\.[0-9]+)?)\\s*([a-zа-яіїєґ]*)$");
+
+    /** Розбирає час: 90, 30s, 15m, 2h, 1d, а також 30хв, 2год, 1дн. Повертає секунди. */
+    private static long parseDuration(String raw) {
+        if (raw == null) {
+            return 0L;
+        }
+        java.util.regex.Matcher m = DUR.matcher(raw.trim().toLowerCase(Locale.ROOT).replace(',', '.'));
+        if (!m.matches()) {
+            return 0L;
+        }
+        double v = Double.parseDouble(m.group(1));
+        String u = m.group(2);
+        long mult = 1L;
+        if (u.startsWith("m") || u.startsWith("х")) {
+            mult = 60L;
+        } else if (u.startsWith("h") || u.startsWith("г")) {
+            mult = 3600L;
+        } else if (u.startsWith("d") || u.startsWith("д")) {
+            mult = 86400L;
+        }
+        return Math.max(0L, Math.round(v * (double) mult));
+    }
+
+    private static String fmtDuration(long sec) {
+        if (sec <= 0L) {
+            return "0 с";
+        }
+        long d = sec / 86400L;
+        long h = sec % 86400L / 3600L;
+        long m = sec % 3600L / 60L;
+        long s = sec % 60L;
+        StringBuilder sb = new StringBuilder();
+        if (d > 0L) {
+            sb.append(d).append(" д ");
+        }
+        if (h > 0L) {
+            sb.append(h).append(" год ");
+        }
+        if (m > 0L && d == 0L) {
+            sb.append(m).append(" хв ");
+        }
+        if (s > 0L && d == 0L && h == 0L) {
+            sb.append(s).append(" с");
+        }
+        return sb.toString().trim();
+    }
+
+    private long cooldownLeft(Quest q, QState st) {
+        if (st == null || !"DONE".equals(st.status) || q.cooldown <= 0L) {
+            return 0L;
+        }
+        return Math.max(0L, st.doneAt + q.cooldown * 1000L - System.currentTimeMillis());
+    }
+
+    /** Чи доступна кнопка діалогу з урахуванням токенів once і cd:<час> в полі умови. */
+    private boolean choiceAvailable(Player p, Choice c) {
+        if (c.cond == null || c.cond.isBlank()) {
+            return true;
+        }
+        Map<String, Long> uses = this.choiceUses.get(p.getUniqueId());
+        Long last = uses == null ? null : uses.get(c.uid);
+        if (last == null) {
+            return true;
+        }
+        for (String part : c.cond.split(",")) {
+            String t = part.trim().toLowerCase(Locale.ROOT);
+            if (t.equals("once")) {
+                return false;
+            }
+            if (t.startsWith("cd:")) {
+                long cd = QuestNPC.parseDuration(t.substring(3));
+                if (cd > 0L && System.currentTimeMillis() - last < cd * 1000L) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private void markChoiceUsed(Player p, Choice c) {
+        if (c.cond == null) {
+            return;
+        }
+        String low = c.cond.toLowerCase(Locale.ROOT);
+        if (!low.contains("once") && !low.contains("cd:")) {
+            return;
+        }
+        this.choiceUses.computeIfAbsent(p.getUniqueId(), k -> new HashMap<>()).put(c.uid, System.currentTimeMillis());
+        this.progressDirty = true;
+    }
+
+    private ItemStack stackOf(String enc) {
+        ItemStack s0 = this.stackCache.get(enc);
+        if (s0 == null) {
+            s0 = this.decode(enc);
+            this.stackCache.put(enc, s0);
+        }
+        return s0.clone();
+    }
+
+    private String stackLabel(Stage sg) {
+        try {
+            ItemStack s0 = this.stackOf(sg.stack);
+            return s0.getType().name() + (s0.hasItemMeta() ? "*" : "");
+        } catch (RuntimeException ex) {
+            return "?";
+        }
+    }
+
+    /** Відповідь NPC окремим вікном (після виконання етапу з полем «відповідь»). */
+    private void openReply(Player p, Npc n, String text) {
+        this.showBubble(p, n, text);
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(this.btn("&aДалі", v -> this.sync(() -> {
+            if (this.useHub(p, n)) {
+                this.openHub(p, n);
+            } else {
+                this.openNode(p, n, n.root);
+            }
+        })));
+        p.showDialog((DialogLike) this.dialog(n.name,
+            List.of(DialogBody.plainMessage((Component) this.fmt(text, p))), List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Закрити", null), (int) 1)));
+    }
+
+    // ======================= ПАНЕЛЬ ПРОГРЕСУ КВЕСТІВ (BOSSBAR) =======================
+
+    private Quest trackedQuest(Player p) {
+        UUID id = p.getUniqueId();
+        Map<String, QState> m = this.progress.get(id);
+        if (m == null) {
+            return null;
+        }
+        String tid = this.tracked.get(id);
+        if (tid != null) {
+            QState st = m.get(tid);
+            Quest q = this.quests.get(tid);
+            if (q != null && st != null && !"DONE".equals(st.status)) {
+                return q;
+            }
+        }
+        for (Map.Entry<String, QState> en : m.entrySet()) {
+            Quest q = this.quests.get(en.getKey());
+            if (q != null && !"DONE".equals(en.getValue().status)) {
+                return q;
+            }
+        }
+        return null;
+    }
+
+    private int countStack(Player p, java.util.function.Predicate<ItemStack> match) {
+        int total = 0;
+        for (ItemStack it : p.getInventory().getContents()) {
+            if (it != null && !it.getType().isAir() && match.test(it)) {
+                total += it.getAmount();
+            }
+        }
+        return total;
+    }
+
+    private float questFraction(Player p, Quest q, QState st) {
+        if ("READY".equals(st.status)) {
+            return 1.0f;
+        }
+        int total = Math.max(1, q.stages.size());
+        double part = 0.0;
+        if (st.stage < q.stages.size()) {
+            Stage sg = q.stages.get(st.stage);
+            int need = Math.max(1, sg.amount);
+            if (sg.type.equals("kill")) {
+                part = Math.min(1.0, st.count / (double) need);
+            } else if (sg.type.equals("deliver") && sg.material != null) {
+                Material mat = sg.material;
+                part = Math.min(1.0, this.countStack(p, it -> it.getType() == mat) / (double) need);
+            } else if (sg.type.equals("item")) {
+                try {
+                    ItemStack tpl = this.stackOf(sg.stack);
+                    part = Math.min(1.0, this.countStack(p, it -> it.isSimilar(tpl)) / (double) need);
+                } catch (RuntimeException ex) {
+                    part = 0.0;
+                }
+            }
+        }
+        return (float) Math.max(0.0, Math.min(1.0, ((double) st.stage + part) / (double) total));
+    }
+
+    private void updateTrackers() {
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            this.updateTracker(p);
+        }
+    }
+
+    private void updateTracker(Player p) {
+        UUID id = p.getUniqueId();
+        boolean enabled = this.getConfig().getBoolean("tracker.enabled", true) && !this.hudOff.contains(id);
+        Quest q = enabled ? this.trackedQuest(p) : null;
+        net.kyori.adventure.bossbar.BossBar bar = this.bars.get(id);
+        if (q == null) {
+            if (bar != null) {
+                p.hideBossBar(bar);
+                this.bars.remove(id);
+            }
+            return;
+        }
+        QState st = this.progress.get(id).get(q.id);
+        Component title = LEGACY.deserialize("&6" + q.name + " &8» " + this.describe(p, q, st));
+        float prog = this.questFraction(p, q, st);
+        net.kyori.adventure.bossbar.BossBar.Color color = "READY".equals(st.status)
+            ? net.kyori.adventure.bossbar.BossBar.Color.GREEN : net.kyori.adventure.bossbar.BossBar.Color.YELLOW;
+        if (bar == null) {
+            bar = net.kyori.adventure.bossbar.BossBar.bossBar(title, prog, color, net.kyori.adventure.bossbar.BossBar.Overlay.PROGRESS);
+            this.bars.put(id, bar);
+            p.showBossBar(bar);
+        } else {
+            bar.name(title);
+            bar.progress(prog);
+            bar.color(color);
+        }
+    }
+
+    private void hideTracker(Player p) {
+        net.kyori.adventure.bossbar.BossBar bar = this.bars.remove(p.getUniqueId());
+        if (bar != null) {
+            p.hideBossBar(bar);
+        }
+    }
+
+    private void openJournal(Player p) {
+        List<DialogBody> body = new ArrayList<>();
+        List<ActionButton> buttons = new ArrayList<>();
+        UUID id = p.getUniqueId();
+        Map<String, QState> m = this.progress.get(id);
+        Quest tq = this.trackedQuest(p);
+        if (m != null) {
+            for (Map.Entry<String, QState> en : m.entrySet()) {
+                QState st = en.getValue();
+                Quest q = this.quests.get(en.getKey());
+                if (q == null || "DONE".equals(st.status)) {
+                    continue;
+                }
+                String desc = q.description.isBlank() ? "" : "\n&7" + q.description;
+                body.add(this.para((q == tq ? "&e★ " : "") + "&6&l" + q.name + desc + "\n" + this.describe(p, q, st)));
+                if (q != tq) {
+                    buttons.add(this.btn("&eВідстежувати: " + q.name, v -> this.sync(() -> {
+                        this.tracked.put(id, q.id);
+                        this.progressDirty = true;
+                        this.updateTracker(p);
+                        this.openJournal(p);
+                    })));
+                }
+            }
+        }
+        if (body.isEmpty()) {
+            body.add(this.para("&7Активних квестів немає. Поговори з жителями, щоб отримати завдання."));
+        }
+        buttons.add(this.btn("Панель квестів зверху: " + (this.hudOff.contains(id) ? "&cвимкнена" : "&aувімкнена"), v -> this.sync(() -> {
+            if (!this.hudOff.remove(id)) {
+                this.hudOff.add(id);
+            }
+            this.progressDirty = true;
+            this.updateTracker(p);
+            this.openJournal(p);
+        })));
+        p.showDialog((DialogLike) this.dialog("&6Журнал квестів", body, List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Закрити", null), (int) 1)));
+    }
+
     private Npc byArg(String[] a) {
         if (a.length < 2) {
             return null;
@@ -2098,6 +2591,7 @@ TabExecutor {
         String label;
         String action;
         String cond;
+        String uid = UUID.randomUUID().toString().substring(0, 8);
         final Node next;
 
         Choice(String label, String action, String cond, Node next) {
@@ -2114,9 +2608,11 @@ TabExecutor {
         String description = "";
         boolean repeatable;
         boolean turnIn;
+        long cooldown = 0L;
         final List<Stage> stages = new ArrayList<Stage>();
         int xp;
         List<String> items = new ArrayList<String>();
+        List<String> stacks = new ArrayList<String>();
         List<String> commands = new ArrayList<String>();
 
         Quest() {
@@ -2127,6 +2623,7 @@ TabExecutor {
         String status = "ACTIVE";
         int stage = 0;
         int count = 0;
+        long doneAt = 0L;
 
         QState() {
         }
@@ -2171,6 +2668,9 @@ TabExecutor {
         int amount = 1;
         Material material;
         int npc = -1;
+        String stack = "";
+        String reply = "";
+        String replyFail = "";
 
         Stage() {
         }
