@@ -1428,6 +1428,10 @@ TabExecutor {
                 }
                 break;
             }
+            case "version": {
+                s.sendMessage("QuestNPC " + this.getPluginMeta().getVersion());
+                return true;
+            }
             case "editor", "quest": {
                 if (!(s instanceof Player)) {
                     s.sendMessage("Тільки для гравців.");
@@ -1547,8 +1551,8 @@ TabExecutor {
         return switch (type) {
             case "reach" -> "Дійти до зони";
             case "kill" -> "Вбити";
-            case "deliver" -> "Принести предмети";
-            case "item" -> "Принести предмет з лівої руки";
+            case "deliver" -> "Віддати предмети (за назвою)";
+            case "item" -> "Віддати предмет з лівої руки (точний)";
             case "talk" -> "Поговорити з NPC";
             default -> type;
         };
@@ -1910,6 +1914,48 @@ TabExecutor {
                 this.openStageEditor(p, q, idx);
             })));
         }
+        if (sg.type.equals("deliver") || sg.type.equals("item") || sg.type.equals("talk")) {
+            buttons.add(this.btn("&bОбрати найближчого NPC (до 15 блоків)", v -> this.sync(() -> {
+                this.applyStage(p, sg, v);
+                Npc best = null;
+                double bd = 15.0;
+                for (Npc n0 : this.npcs.values()) {
+                    if (n0.loc.getWorld() != p.getWorld()) {
+                        continue;
+                    }
+                    double d = n0.loc.distance(p.getLocation());
+                    if (d < bd) {
+                        bd = d;
+                        best = n0;
+                    }
+                }
+                if (best == null) {
+                    p.sendMessage(this.text("&cПоруч (до 15 блоків) немає NPC. Підійди до NPC і натисни ще раз."));
+                } else {
+                    sg.npc = best.id;
+                    p.sendMessage(this.text("&aОбрано NPC №" + best.id + ": &f" + best.name));
+                }
+                this.saveQuests();
+                this.openStageEditor(p, q, idx);
+            })));
+        }
+        if (sg.type.equals("deliver")) {
+            buttons.add(this.btn("&dВзяти предмет з лівої руки (точний, з зачаруваннями)", v -> this.sync(() -> {
+                this.applyStage(p, sg, v);
+                ItemStack held = p.getInventory().getItemInOffHand();
+                if (held.getType().isAir()) {
+                    p.sendMessage(this.text("&cПоклади предмет у ліву руку (клавіша F міняє руки)."));
+                } else {
+                    sg.stack = this.encode(held.clone());
+                    sg.amount = held.getAmount();
+                    sg.material = held.getType();
+                    sg.type = "item";
+                    p.sendMessage(this.text("&aТепер NPC прийме саме цей предмет (з назвою й зачаруваннями): &f" + held.getType().name() + " x" + held.getAmount()));
+                }
+                this.saveQuests();
+                this.openStageEditor(p, q, idx);
+            })));
+        }
         if (sg.type.equals("item")) {
             buttons.add(this.btn("&dЗамінити предмет на той, що в лівій руці", v -> this.sync(() -> {
                 this.applyStage(p, sg, v);
@@ -1953,7 +1999,7 @@ TabExecutor {
             this.openStages(p, q);
         })));
         p.showDialog((DialogLike) this.dialog("&5Етап " + (idx + 1) + ": " + QuestNPC.stageLabel(sg.type),
-            List.of(this.para("Квест: " + q.name)), inputs,
+            List.of(this.para("Квест: " + q.name + " &8(QuestNPC " + this.getPluginMeta().getVersion() + ")")), inputs,
             (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад (без збереження)", v -> this.sync(() -> this.openStages(p, q))), (int) 1)));
     }
 
@@ -2566,7 +2612,7 @@ TabExecutor {
             return List.of();
         }
         if (a.length == 1) {
-            return List.of("give", "list", "remove", "tp", "here", "quests", "editor", "reload").stream().filter(x -> x.startsWith(a[0].toLowerCase())).toList();
+            return List.of("give", "list", "remove", "tp", "here", "quests", "editor", "version", "reload").stream().filter(x -> x.startsWith(a[0].toLowerCase())).toList();
         }
         if (a.length == 2 && (a[0].equalsIgnoreCase("remove") || a[0].equalsIgnoreCase("tp"))) {
             return this.npcs.keySet().stream().map(String::valueOf).filter(x -> x.startsWith(a[1])).toList();
