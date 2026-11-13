@@ -1548,7 +1548,7 @@ TabExecutor {
             case "reach" -> "Дійти до зони";
             case "kill" -> "Вбити";
             case "deliver" -> "Принести предмети";
-            case "item" -> "Принести предмет з руки";
+            case "item" -> "Принести предмет з лівої руки";
             case "talk" -> "Поговорити з NPC";
             default -> type;
         };
@@ -1654,7 +1654,7 @@ TabExecutor {
         List<String> items = new ArrayList<>();
         for (String entry : QuestNPC.lines(v.apply("items"))) {
             if (Material.matchMaterial(entry.split(":")[0].trim()) == null) {
-                p.sendMessage(this.text("&cНевідомий предмет пропущено: &f" + entry));
+                this.suggestItems(p, entry.split(":")[0]);
                 continue;
             }
             items.add(entry);
@@ -1689,11 +1689,11 @@ TabExecutor {
             this.saveQuests();
             this.openStages(p, q);
         })));
-        buttons.add(this.btn("&dНагорода: предмет з руки (+) &7[" + q.stacks.size() + "]", v -> this.sync(() -> {
+        buttons.add(this.btn("&dНагорода: предмет з лівої руки (+) &7[" + q.stacks.size() + "]", v -> this.sync(() -> {
             this.applyQuestFields(p, q, v);
-            ItemStack held = p.getInventory().getItemInMainHand();
+            ItemStack held = p.getInventory().getItemInOffHand();
             if (held.getType().isAir()) {
-                p.sendMessage(this.text("&cВізьми в основну руку предмет, який хочеш додати в нагороду."));
+                p.sendMessage(this.text("&cПоклади в ліву руку (клавіша F міняє руки) предмет, який хочеш додати в нагороду."));
             } else {
                 q.stacks.add(this.encode(held.clone()));
                 p.sendMessage(this.text("&aПредмет додано в нагороду (зачарування й назва збережені): &f" + held.getType().name() + " x" + held.getAmount()));
@@ -1702,7 +1702,7 @@ TabExecutor {
             this.openQuestEditor(p, q);
         })));
         if (!q.stacks.isEmpty()) {
-            buttons.add(this.btn("&cОчистити предмети з руки", v -> this.sync(() -> {
+            buttons.add(this.btn("&cОчистити предмети з лівої руки", v -> this.sync(() -> {
                 this.applyQuestFields(p, q, v);
                 q.stacks.clear();
                 this.saveQuests();
@@ -1762,9 +1762,9 @@ TabExecutor {
                 } else if (t.equals("deliver")) {
                     sg.material = Material.STONE;
                 } else if (t.equals("item")) {
-                    ItemStack held = p.getInventory().getItemInMainHand();
+                    ItemStack held = p.getInventory().getItemInOffHand();
                     if (held.getType().isAir()) {
-                        p.sendMessage(this.text("&cВізьми в руку предмет, який треба принести NPC, і натисни ще раз."));
+                        p.sendMessage(this.text("&cПоклади в ліву руку (клавіша F міняє руки) предмет, який треба принести NPC, і натисни ще раз."));
                         this.openStages(p, q);
                         return;
                     }
@@ -1821,7 +1821,7 @@ TabExecutor {
                 case "deliver" -> {
                     Material m = Material.matchMaterial(QuestNPC.clean(v.apply("material"), ""));
                     if (m == null) {
-                        p.sendMessage(this.text("&cНевідомий предмет."));
+                        this.suggestItems(p, QuestNPC.clean(v.apply("material"), ""));
                         return false;
                     }
                     sg.material = m;
@@ -1911,11 +1911,11 @@ TabExecutor {
             })));
         }
         if (sg.type.equals("item")) {
-            buttons.add(this.btn("&dЗамінити предмет на той, що в руці", v -> this.sync(() -> {
+            buttons.add(this.btn("&dЗамінити предмет на той, що в лівій руці", v -> this.sync(() -> {
                 this.applyStage(p, sg, v);
-                ItemStack held = p.getInventory().getItemInMainHand();
+                ItemStack held = p.getInventory().getItemInOffHand();
                 if (held.getType().isAir()) {
-                    p.sendMessage(this.text("&cВізьми предмет в основну руку."));
+                    p.sendMessage(this.text("&cПоклади предмет у ліву руку (клавіша F міняє руки)."));
                 } else {
                     sg.stack = this.encode(held.clone());
                     sg.amount = held.getAmount();
@@ -2352,6 +2352,25 @@ TabExecutor {
         }
         this.choiceUses.computeIfAbsent(p.getUniqueId(), k -> new HashMap<>()).put(c.uid, System.currentTimeMillis());
         this.progressDirty = true;
+    }
+
+    /** Підказує назви предметів, що містять введений текст (пошук). */
+    private void suggestItems(Player p, String query) {
+        String q = query == null ? "" : query.trim().toUpperCase(Locale.ROOT).replace(' ', '_').replace("MINECRAFT:", "");
+        List<String> hits = new ArrayList<>();
+        if (!q.isEmpty()) {
+            for (Material m : Material.values()) {
+                if (!m.isLegacy() && m.isItem() && m.name().contains(q)) {
+                    hits.add(m.name());
+                    if (hits.size() >= 8) {
+                        break;
+                    }
+                }
+            }
+        }
+        p.sendMessage(this.text(hits.isEmpty()
+            ? "&cПредмет не знайдено: &f" + query + "&c. Спробуй англійську назву, напр. diamond_sword."
+            : "&cТочної назви немає. Можливо, ти мав на увазі: &f" + String.join(", ", hits)));
     }
 
     private ItemStack stackOf(String enc) {
