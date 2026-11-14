@@ -167,6 +167,8 @@ TabExecutor {
     private final Map<UUID, Map<String, QState>> progress = new HashMap<UUID, Map<String, QState>>();
     private boolean progressDirty = false;
     private boolean uidGenerated = false;
+    private final Map<String, Line> lines = new LinkedHashMap<>();
+    private final Map<UUID, java.util.Set<String>> linesDone = new HashMap<>();
     private final Map<UUID, Map<String, Long>> choiceUses = new HashMap<>();
     private final Map<UUID, String> tracked = new HashMap<>();
     private final java.util.Set<UUID> hudOff = new java.util.HashSet<>();
@@ -212,6 +214,7 @@ TabExecutor {
     public void onDisable() {
         for (Player pl : Bukkit.getOnlinePlayers()) {
             this.hideTracker(pl);
+            this.removeMarkers(pl);
         }
         for (UUID id : new ArrayList<>(this.bubbles.keySet())) {
             this.removeBubble(id);
@@ -450,7 +453,11 @@ TabExecutor {
             if (a.equals("trade")) {
                 this.openTrade(p, n);
             } else if (a.startsWith("quest:")) {
-                if (this.startQuest(p, a.substring(6).trim())) {
+                String qid = a.substring(6).trim();
+                Quest oq = this.quests.get(qid);
+                if (oq != null && this.getConfig().getBoolean("offer.confirm", true) && this.canStart(p, oq)) {
+                    this.openQuestOffer(p, n, oq, () -> this.openNode(p, n, c.next), () -> this.openNode(p, n, node));
+                } else if (this.startQuest(p, qid)) {
                     this.openNode(p, n, c.next);
                 } else {
                     this.openNode(p, n, node);
@@ -492,7 +499,7 @@ TabExecutor {
         QState st = this.stateOf(p, qid);
         return switch (kind) {
             case "new" -> {
-                if (q != null && (st == null || "DONE".equals(st.status) && q.repeatable && this.cooldownLeft(q, st) == 0L)) {
+                if (q != null && (st == null || "DONE".equals(st.status) && q.repeatable && this.cooldownLeft(q, st) == 0L) && this.blockReason(p, q) == null) {
                     yield true;
                 }
                 yield false;
@@ -720,12 +727,22 @@ TabExecutor {
             p.sendMessage(this.text("&eЦей квест можна взяти знову через &f" + QuestNPC.fmtDuration(this.cooldownLeft(q, st) / 1000L + 1L)));
             return false;
         }
+        if (this.limitReached(p) && (st == null || "DONE".equals(st.status))) {
+            p.sendMessage(this.text("&cУ тебе забагато активних квестів (максимум " + this.getConfig().getInt("quest.max-active", 0) + "). Заверши або скасуй один з них."));
+            return false;
+        }
+        String blockWhy = this.blockReason(p, q);
+        if (blockWhy != null && (st == null || "DONE".equals(st.status))) {
+            p.sendMessage(this.text("&cКвест закрито: &f" + blockWhy));
+            return false;
+        }
         if (!(st == null || "DONE".equals(st.status) && q.repeatable)) {
             p.sendMessage(this.text("DONE".equals(st.status) ? "&7\u0426\u0435\u0439 \u043a\u0432\u0435\u0441\u0442 \u0443\u0436\u0435 \u0432\u0438\u043a\u043e\u043d\u0430\u043d\u043e." : "&7\u0422\u0438 \u0432\u0436\u0435 \u0432\u0437\u044f\u0432 \u0446\u0435\u0439 \u043a\u0432\u0435\u0441\u0442."));
             return false;
         }
         this.progress.computeIfAbsent(p.getUniqueId(), k -> new LinkedHashMap()).put(qid, new QState());
         this.tracked.put(p.getUniqueId(), qid);
+        this.progress.get(p.getUniqueId()).get(qid).startedAt = System.currentTimeMillis();
         this.saveProgress();
         p.sendMessage(this.text("&6\u041a\u0432\u0435\u0441\u0442 \u0432\u0437\u044f\u0442\u043e: &f" + q.name));
         if (!q.stages.isEmpty()) {
@@ -755,6 +772,7 @@ TabExecutor {
                 this.saveProgress();
                 p.sendMessage(this.text("&a\u0423\u0441\u0456 \u0435\u0442\u0430\u043f\u0438 \u043a\u0432\u0435\u0441\u0442\u0443 \"" + q.name + "\" \u0432\u0438\u043a\u043e\u043d\u0430\u043d\u043e. \u041f\u043e\u0432\u0435\u0440\u043d\u0456\u0442\u044c\u0441\u044f \u0434\u043e NPC, \u0449\u043e\u0431 \u0437\u0434\u0430\u0442\u0438."));
                 p.playSound(p.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 0.6f, 1.4f);
+                this.notifyTitle(p, "&6&lЕтапи виконано", "&fПовернись до NPC, щоб здати «" + q.name + "»");
             } else {
                 this.complete(p, q, st);
             }
@@ -771,6 +789,11 @@ TabExecutor {
         this.saveProgress();
         p.sendMessage(this.text("&a&l\u041a\u0432\u0435\u0441\u0442 \u0432\u0438\u043a\u043e\u043d\u0430\u043d\u043e: &f" + q.name));
         p.playSound(p.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+        this.notifyTitle(p, "&a&lКвест виконано!", "&f" + q.name);
+        this.getServer().getScheduler().runTask((Plugin) this, () -> this.checkLines(p));
+        if (this.getConfig().getBoolean("notify.broadcast", false)) {
+            Bukkit.broadcast(LEGACY.deserialize("&6" + p.getName() + " &7виконав квест: &f" + q.name));
+        }
         if (q.xp > 0) {
             p.giveExp(q.xp);
         }
@@ -986,6 +1009,8 @@ TabExecutor {
         this.lastUse.remove(e.getPlayer().getUniqueId());
         this.removeBubble(e.getPlayer().getUniqueId());
         this.hideTracker(e.getPlayer());
+        this.removeMarkers(e.getPlayer());
+        this.bubbleNpc.remove(e.getPlayer().getUniqueId());
     }
 
     private String encode(ItemStack item) {
@@ -1166,6 +1191,7 @@ TabExecutor {
 
     private void loadQuests() {
         this.quests.clear();
+        this.lines.clear();
         if (!this.questsFile.exists()) {
             return;
         }
@@ -1189,6 +1215,18 @@ TabExecutor {
             q.repeatable = s.getBoolean("repeatable", false);
             q.turnIn = s.getBoolean("turn-in", false);
             q.cooldown = Math.max(0L, s.getLong("cooldown", 0L));
+            for (String r : s.getStringList("requires")) {
+                q.requires.add(r.toLowerCase(Locale.ROOT));
+            }
+            for (String r : s.getStringList("excludes")) {
+                q.excludes.add(r.toLowerCase(Locale.ROOT));
+            }
+            q.minLevel = Math.max(0, s.getInt("min-level", 0));
+            q.giver = s.getInt("giver", -1);
+            q.dailyReset = Math.max(-1, QuestNPC.parseHhmm(s.getString("daily-reset", "")));
+            q.timeLimit = Math.max(0L, s.getLong("time-limit", 0L));
+            q.acceptReply = s.getString("accept-reply", "");
+            q.declineReply = s.getString("decline-reply", "");
             q.xp = s.getInt("rewards.xp", 0);
             q.items = s.getStringList("rewards.items");
             q.stacks = new ArrayList<>(s.getStringList("rewards.stacks"));
@@ -1262,6 +1300,26 @@ TabExecutor {
             }
             this.quests.put(id, q);
         }
+        ConfigurationSection ls = y.getConfigurationSection("lines");
+        if (ls != null) {
+            for (String lid : ls.getKeys(false)) {
+                ConfigurationSection lc = ls.getConfigurationSection(lid);
+                if (lc == null) continue;
+                Line ln = new Line();
+                ln.id = lid.toLowerCase(Locale.ROOT);
+                ln.name = lc.getString("name", ln.id);
+                ln.description = lc.getString("description", "");
+                for (String qid : lc.getStringList("quests")) {
+                    String k = qid.toLowerCase(Locale.ROOT);
+                    if (this.quests.containsKey(k)) {
+                        ln.quests.add(k);
+                    }
+                }
+                ln.xp = lc.getInt("rewards.xp", 0);
+                ln.commands = new ArrayList<>(lc.getStringList("rewards.commands"));
+                this.lines.put(ln.id, ln);
+            }
+        }
         this.getLogger().info("\u0417\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0435\u043d\u043e \u043a\u0432\u0435\u0441\u0442\u0456\u0432: " + this.quests.size());
     }
 
@@ -1296,6 +1354,15 @@ TabExecutor {
                 } catch (IllegalArgumentException ignored) { }
             }
         }
+        this.linesDone.clear();
+        ConfigurationSection ld = y.getConfigurationSection("lines-done");
+        if (ld != null) {
+            for (String u : ld.getKeys(false)) {
+                try {
+                    this.linesDone.put(UUID.fromString(u), new java.util.HashSet<>(ld.getStringList(u)));
+                } catch (IllegalArgumentException ignored) { }
+            }
+        }
         for (String u : y.getStringList("hud-off")) {
             try {
                 this.hudOff.add(UUID.fromString(u));
@@ -1319,6 +1386,7 @@ TabExecutor {
                     st.stage = qs.getInt("stage", 0);
                     st.count = qs.getInt("count", 0);
                     st.doneAt = qs.getLong("doneAt", 0L);
+                    st.startedAt = qs.getLong("startedAt", 0L);
                     map.put(qid, st);
                 }
                 this.progress.put(uuid, map);
@@ -1337,6 +1405,7 @@ TabExecutor {
                 y.set(b + "stage", (Object)qe.getValue().stage);
                 y.set(b + "count", (Object)qe.getValue().count);
                 y.set(b + "doneAt", (Object)qe.getValue().doneAt);
+                y.set(b + "startedAt", (Object)qe.getValue().startedAt);
             }
         }
         for (Map.Entry<UUID, Map<String, Long>> ue : this.choiceUses.entrySet()) {
@@ -1348,6 +1417,9 @@ TabExecutor {
             y.set("tracked." + te.getKey(), te.getValue());
         }
         y.set("hud-off", this.hudOff.stream().map(UUID::toString).toList());
+        for (Map.Entry<UUID, java.util.Set<String>> le : this.linesDone.entrySet()) {
+            y.set("lines-done." + le.getKey(), new ArrayList<>(le.getValue()));
+        }
         try {
             y.save(this.progressFile);
         }
@@ -1463,6 +1535,7 @@ TabExecutor {
         "#              deliver (принести предмети NPC), talk (поговорити з NPC).",
         "# turn-in: true - після останнього етапу квест чекає здачі (дія turnin:<id>).",
         "# У діалозі NPC: дія quest:<id> (взяти), turnin:<id> (здати).",
+        "# requires / excludes / min-level / giver та розділ lines - вимоги, видавець і лінійки квестів (редагуються в грі).",
         "# Умови кнопок: new:<id>, active:<id>, ready:<id>, done:<id>; перед умовою можна ставити !",
         "", "");
 
@@ -1475,6 +1548,30 @@ TabExecutor {
             y.set(b + "repeatable", q.repeatable);
             y.set(b + "turn-in", q.turnIn);
             y.set(b + "cooldown", q.cooldown);
+            if (!q.requires.isEmpty()) {
+                y.set(b + "requires", q.requires);
+            }
+            if (!q.excludes.isEmpty()) {
+                y.set(b + "excludes", q.excludes);
+            }
+            if (q.minLevel > 0) {
+                y.set(b + "min-level", q.minLevel);
+            }
+            if (q.giver >= 0) {
+                y.set(b + "giver", q.giver);
+            }
+            if (q.dailyReset >= 0) {
+                y.set(b + "daily-reset", QuestNPC.hhmm(q.dailyReset));
+            }
+            if (q.timeLimit > 0L) {
+                y.set(b + "time-limit", q.timeLimit);
+            }
+            if (!q.acceptReply.isBlank()) {
+                y.set(b + "accept-reply", q.acceptReply);
+            }
+            if (!q.declineReply.isBlank()) {
+                y.set(b + "decline-reply", q.declineReply);
+            }
             List<Map<String, Object>> st = new ArrayList<>();
             for (Stage sg : q.stages) {
                 Map<String, Object> m = new LinkedHashMap<>();
@@ -1522,7 +1619,19 @@ TabExecutor {
             y.set(b + "rewards.stacks", q.stacks);
             y.set(b + "rewards.commands", q.commands);
         }
+        for (Line ln : this.lines.values()) {
+            String lb = "lines." + ln.id + ".";
+            y.set(lb + "name", ln.name);
+            y.set(lb + "description", ln.description);
+            y.set(lb + "quests", ln.quests);
+            y.set(lb + "rewards.xp", ln.xp);
+            y.set(lb + "rewards.commands", ln.commands);
+        }
         try {
+            java.nio.file.Path qp = this.questsFile.toPath();
+            if (java.nio.file.Files.exists(qp)) {
+                java.nio.file.Files.copy(qp, qp.resolveSibling("quests.yml.bak"), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
             java.nio.file.Files.writeString(this.questsFile.toPath(), QUESTS_HEADER + y.saveToString(),
                 java.nio.charset.StandardCharsets.UTF_8);
         } catch (IOException ex) {
@@ -1561,6 +1670,7 @@ TabExecutor {
     private void openQuestList(Player p) {
         List<ActionButton> buttons = new ArrayList<>();
         buttons.add(this.btn("&a+ Новий квест", v -> this.sync(() -> this.openQuestNew(p))));
+        buttons.add(this.btn("&bЛінійки квестів", v -> this.sync(() -> this.openLineAdmin(p))));
         for (Quest q : this.quests.values()) {
             buttons.add(this.btn(q.name + " &8(" + q.id + ")", v -> this.sync(() -> this.openQuestEditor(p, q))));
         }
@@ -1655,6 +1765,16 @@ TabExecutor {
             p.sendMessage(this.text("&cДосвід має бути цілим числом - залишено попереднє значення."));
         }
         q.cooldown = QuestNPC.parseDuration(v.apply("cooldown"));
+        int dr = QuestNPC.parseHhmm(v.apply("dailyreset"));
+        if (dr == -2) {
+            p.sendMessage(this.text("&cЧас має бути у форматі ГГ:ХХ, напр. 04:00 - залишено попереднє значення."));
+        } else {
+            q.dailyReset = dr;
+            if (dr >= 0) {
+                q.repeatable = true;
+            }
+        }
+        q.timeLimit = QuestNPC.parseDuration(v.apply("timelimit"));
         List<String> items = new ArrayList<>();
         for (String entry : QuestNPC.lines(v.apply("items"))) {
             if (Material.matchMaterial(entry.split(":")[0].trim()) == null) {
@@ -1677,6 +1797,8 @@ TabExecutor {
         inputs.add(this.block("description", "Опис", q.description, 500));
         inputs.add(this.line("xp", "Нагорода: досвід", String.valueOf(q.xp), 7));
         inputs.add(this.line("cooldown", "Кулдаун повтору (напр. 30m, 12h, 1d; 0 = без; працює для повторюваних)", q.cooldown > 0L ? q.cooldown + "s" : "0", 12));
+        inputs.add(this.line("dailyreset", "Щоденне оновлення о (ГГ:ХХ, напр. 04:00; порожньо = немає)", q.dailyReset >= 0 ? QuestNPC.hhmm(q.dailyReset) : "", 5));
+        inputs.add(this.line("timelimit", "Ліміт часу на виконання (напр. 30m, 2h; 0 = без)", q.timeLimit > 0L ? q.timeLimit + "s" : "0", 12));
         inputs.add(this.block("items", "Нагорода: предмети (МАТЕРІАЛ:кількість, кожен з нового рядка)",
             String.join("\n", q.items), 500));
         inputs.add(this.block("commands", "Нагорода: команди від консолі ({player} = нік, по одній в рядок)",
@@ -1713,6 +1835,11 @@ TabExecutor {
                 this.openQuestEditor(p, q);
             })));
         }
+        buttons.add(this.btn("&bВимоги, видавець, відповіді NPC", v -> this.sync(() -> {
+            this.applyQuestFields(p, q, v);
+            this.saveQuests();
+            this.openReqEditor(p, q);
+        })));
         buttons.add(this.btn("Повторюваний: " + (q.repeatable ? "&aтак" : "&cні"), v -> this.sync(() -> {
             this.applyQuestFields(p, q, v);
             q.repeatable = !q.repeatable;
@@ -1725,6 +1852,15 @@ TabExecutor {
             this.saveQuests();
             this.openQuestEditor(p, q);
         })));
+        buttons.add(this.btn("&dДублювати квест", v -> this.sync(() -> {
+            this.applyQuestFields(p, q, v);
+            this.saveQuests();
+            Quest dup = this.copyQuest(q);
+            this.quests.put(dup.id, dup);
+            this.saveQuests();
+            p.sendMessage(this.text("&aСтворено копію: &f" + dup.id + " &7(видавця NPC в копії скинуто)"));
+            this.openQuestEditor(p, dup);
+        })));
         buttons.add(this.btn("&cВидалити квест", v -> this.sync(() -> this.openQuestDelete(p, q))));
         p.showDialog((DialogLike) this.dialog("&5Квест: " + q.id,
             List.of(this.para("У діалозі NPC: дія &equest:" + q.id + "&r - взяти, &eturnin:" + q.id + "&r - здати.")),
@@ -1736,6 +1872,13 @@ TabExecutor {
         ConfirmationType type = DialogType.confirmation(
             (ActionButton) this.btn("&cТак, видалити", v -> this.sync(() -> {
                 this.quests.remove(q.id);
+                for (Line dl : this.lines.values()) {
+                    dl.quests.remove(q.id);
+                }
+                for (Quest oq2 : this.quests.values()) {
+                    oq2.requires.remove(q.id);
+                    oq2.excludes.remove(q.id);
+                }
                 this.saveQuests();
                 p.sendMessage(this.text("&aКвест видалено."));
                 this.openQuestList(p);
@@ -2080,6 +2223,7 @@ TabExecutor {
         });
         p.showEntity(this, d);
         this.bubbles.put(id, d);
+        this.bubbleNpc.put(id, n.id);
         long ticks = Math.max(60L, Math.min(300L, 40L + (long) shown.length() * 3L));
         Bukkit.getScheduler().runTaskLater(this, () -> {
             if (this.bubbles.get(id) == d) {
@@ -2110,6 +2254,11 @@ TabExecutor {
     private List<Quest> npcQuests(Player p, Npc n) {
         java.util.Set<String> ids = new java.util.LinkedHashSet<>();
         this.collectQuestIds(n.root, ids);
+        for (Quest gq : this.quests.values()) {
+            if (gq.giver == n.id) {
+                ids.add(gq.id);
+            }
+        }
         Map<String, QState> m = this.progress.get(p.getUniqueId());
         if (m != null) {
             for (Map.Entry<String, QState> en : m.entrySet()) {
@@ -2135,6 +2284,9 @@ TabExecutor {
 
     private String questTag(Player p, Quest q) {
         QState st = this.stateOf(p, q.id);
+        if (st == null && this.blockReason(p, q) != null) {
+            return "&8[Закрито] &7";
+        }
         if (st == null) {
             return "&a[Новий] &f";
         }
@@ -2183,6 +2335,7 @@ TabExecutor {
     private void openQuestDetail(Player p, Npc n, Quest q) {
         QState st = this.stateOf(p, q.id);
         boolean fresh = st == null || "DONE".equals(st.status) && q.repeatable && this.cooldownLeft(q, st) == 0L;
+        String lock = fresh ? this.blockReason(p, q) : null;
         List<DialogBody> body = new ArrayList<>();
         if (!q.description.isBlank()) {
             body.add(DialogBody.plainMessage((Component) this.fmt(q.description, p)));
@@ -2223,19 +2376,39 @@ TabExecutor {
         if (!rewards.isEmpty()) {
             body.add(DialogBody.plainMessage((Component) this.fmt("&6Нагорода: &f" + String.join(", ", rewards), p)));
         }
+        if (q.dailyReset >= 0) {
+            body.add(DialogBody.plainMessage((Component) this.fmt("&7Оновлюється щодня о &f" + QuestNPC.hhmm(q.dailyReset), p)));
+        }
+        if (q.timeLimit > 0L) {
+            body.add(DialogBody.plainMessage((Component) this.fmt("&cЛіміт часу: &f" + QuestNPC.fmtDuration(q.timeLimit), p)));
+        }
+        if (lock != null) {
+            body.add(DialogBody.plainMessage((Component) this.fmt("&cКвест закрито: &f" + lock, p)));
+        }
         List<ActionButton> buttons = new ArrayList<>();
         if (fresh) {
-            buttons.add(this.btn("&aВзяти квест", v -> this.sync(() -> {
-                this.startQuest(p, q.id);
-                this.openQuestDetail(p, n, q);
-            })));
+            if (lock == null) {
+                buttons.add(this.btn("&aПрийняти квест", v -> this.sync(() -> {
+                    if (this.startQuest(p, q.id) && !q.acceptReply.isBlank()) {
+                        this.openReply(p, n, q.acceptReply);
+                    } else {
+                        this.openQuestDetail(p, n, q);
+                    }
+                })));
+            }
         } else if ("READY".equals(st.status)) {
             buttons.add(this.btn("&6Здати квест", v -> this.sync(() -> {
                 this.turnIn(p, q.id);
                 this.openQuestDetail(p, n, q);
             })));
         }
-        ActionButton back = this.btn("&7Назад", v -> this.sync(() -> this.openQuestMenu(p, n)));
+        ActionButton back = this.btn(fresh && lock == null ? "&cВідхилити" : "&7Назад", v -> this.sync(() -> {
+            if (fresh && lock == null && !q.declineReply.isBlank()) {
+                this.openReply(p, n, q.declineReply);
+            } else {
+                this.openQuestMenu(p, n);
+            }
+        }));
         DialogType type = buttons.isEmpty()
             ? DialogType.notice(back)
             : DialogType.multiAction(buttons, back, (int) 1);
@@ -2357,10 +2530,17 @@ TabExecutor {
     }
 
     private long cooldownLeft(Quest q, QState st) {
-        if (st == null || !"DONE".equals(st.status) || q.cooldown <= 0L) {
+        if (st == null || !"DONE".equals(st.status)) {
             return 0L;
         }
-        return Math.max(0L, st.doneAt + q.cooldown * 1000L - System.currentTimeMillis());
+        long left = 0L;
+        if (q.cooldown > 0L) {
+            left = Math.max(0L, st.doneAt + q.cooldown * 1000L - System.currentTimeMillis());
+        }
+        if (q.dailyReset >= 0) {
+            left = Math.max(left, this.dailyLeft(q, st));
+        }
+        return left;
     }
 
     /** Чи доступна кнопка діалогу з урахуванням токенів once і cd:<час> в полі умови. */
@@ -2517,7 +2697,9 @@ TabExecutor {
     private void updateTrackers() {
         for (Player p : Bukkit.getOnlinePlayers()) {
             this.autoCollect(p);
+            this.checkTimeouts(p);
             this.updateTracker(p);
+            this.updateMarkers(p);
         }
     }
 
@@ -2535,6 +2717,10 @@ TabExecutor {
         }
         QState st = this.progress.get(id).get(q.id);
         Component title = LEGACY.deserialize("&6&l" + q.name + " &8▸ ").append(this.describeC(p, q, st));
+        if (q.timeLimit > 0L && "ACTIVE".equals(st.status) && st.startedAt > 0L) {
+            long leftMs = Math.max(0L, st.startedAt + q.timeLimit * 1000L - System.currentTimeMillis());
+            title = title.append(LEGACY.deserialize(" &c[" + QuestNPC.clock(leftMs / 1000L) + "]"));
+        }
         float prog = this.questFraction(p, q, st);
         net.kyori.adventure.bossbar.BossBar.Color color = "READY".equals(st.status)
             ? net.kyori.adventure.bossbar.BossBar.Color.GREEN : net.kyori.adventure.bossbar.BossBar.Color.YELLOW;
@@ -2579,10 +2765,16 @@ TabExecutor {
                         this.openJournal(p);
                     })));
                 }
+                if (this.getConfig().getBoolean("quest.allow-cancel", true)) {
+                    buttons.add(this.btn("&cСкасувати: " + q.name, v -> this.sync(() -> this.openCancelConfirm(p, q))));
+                }
             }
         }
         if (body.isEmpty()) {
             body.add(this.para("&7Активних квестів немає. Поговори з жителями, щоб отримати завдання."));
+        }
+        if (!this.lines.isEmpty()) {
+            buttons.add(this.btn("&bЛінійки квестів", v -> this.sync(() -> this.openLines(p))));
         }
         buttons.add(this.btn("Панель квестів зверху: " + (this.hudOff.contains(id) ? "&cвимкнена" : "&aувімкнена"), v -> this.sync(() -> {
             if (!this.hudOff.remove(id)) {
@@ -2693,6 +2885,675 @@ TabExecutor {
         }
     }
 
+    // ======================= v0.5.3: ПРИЙНЯТИ/ВІДХИЛИТИ, СКАСУВАТИ, СПОВІЩЕННЯ =======================
+
+    private boolean canStart(Player p, Quest q) {
+        QState st = this.stateOf(p, q.id);
+        return (st == null || "DONE".equals(st.status) && q.repeatable && this.cooldownLeft(q, st) == 0L) && this.blockReason(p, q) == null && !this.limitReached(p);
+    }
+
+    private List<String> rewardList(Quest q) {
+        List<String> rewards = new ArrayList<>();
+        if (q.xp > 0) {
+            rewards.add(q.xp + " досвіду");
+        }
+        for (String it : q.items) {
+            rewards.add(it.replace(":", " x"));
+        }
+        for (String enc : q.stacks) {
+            try {
+                ItemStack st0 = this.decode(enc);
+                rewards.add(st0.getAmount() + " x " + st0.getType().name() + (st0.hasItemMeta() ? " (особливий)" : ""));
+            } catch (RuntimeException ex) {
+                rewards.add("предмет");
+            }
+        }
+        return rewards;
+    }
+
+    /** Вікно пропозиції квесту: опис, завдання, нагорода та кнопки «Прийняти» / «Відхилити». */
+    private void openQuestOffer(Player p, Npc n, Quest q, Runnable onAccept, Runnable onDecline) {
+        List<DialogBody> body = new ArrayList<>();
+        if (!q.description.isBlank()) {
+            body.add(DialogBody.plainMessage((Component) this.fmt(q.description, p)));
+        }
+        StringBuilder sb = new StringBuilder("&6Завдання:");
+        for (int i = 0; i < q.stages.size(); i++) {
+            sb.append("\n&7").append(i + 1).append(". &f").append(q.stages.get(i).text);
+        }
+        body.add(DialogBody.plainMessage((Component) this.fmt(sb.toString(), p)));
+        List<String> rewards = this.rewardList(q);
+        if (!rewards.isEmpty()) {
+            body.add(DialogBody.plainMessage((Component) this.fmt("&6Нагорода: &f" + String.join(", ", rewards), p)));
+        }
+        if (q.repeatable) {
+            body.add(DialogBody.plainMessage((Component) this.fmt(q.cooldown > 0L
+                ? "&7Повторюваний, кулдаун: &f" + QuestNPC.fmtDuration(q.cooldown) : "&7Повторюваний", p)));
+        }
+        if (q.dailyReset >= 0) {
+            body.add(DialogBody.plainMessage((Component) this.fmt("&7Оновлюється щодня о &f" + QuestNPC.hhmm(q.dailyReset), p)));
+        }
+        if (q.timeLimit > 0L) {
+            body.add(DialogBody.plainMessage((Component) this.fmt("&cЛіміт часу: &f" + QuestNPC.fmtDuration(q.timeLimit), p)));
+        }
+        ConfirmationType type = DialogType.confirmation(
+            (ActionButton) this.btn("&aПрийняти", v -> this.sync(() -> {
+                if (this.startQuest(p, q.id)) {
+                    if (!q.acceptReply.isBlank()) {
+                        this.openReply(p, n, q.acceptReply);
+                    } else {
+                        onAccept.run();
+                    }
+                } else {
+                    onDecline.run();
+                }
+            })),
+            (ActionButton) this.btn("&cВідхилити", v -> this.sync(() -> {
+                p.sendMessage(this.text("&7Ти відмовився від квесту: &f" + q.name));
+                if (!q.declineReply.isBlank()) {
+                    this.openReply(p, n, q.declineReply);
+                } else {
+                    onDecline.run();
+                }
+            })));
+        p.showDialog((DialogLike) this.dialog("&6" + q.name, body, List.of(), (DialogType) type));
+    }
+
+    private void openCancelConfirm(Player p, Quest q) {
+        ConfirmationType type = DialogType.confirmation(
+            (ActionButton) this.btn("&cТак, скасувати", v -> this.sync(() -> {
+                Map<String, QState> m = this.progress.get(p.getUniqueId());
+                if (m != null) {
+                    m.remove(q.id);
+                }
+                this.saveProgress();
+                this.updateTracker(p);
+                p.sendMessage(this.text("&7Квест скасовано: &f" + q.name + "&7. Його можна взяти знову."));
+                this.openJournal(p);
+            })),
+            (ActionButton) this.btn("&7Ні", v -> this.sync(() -> this.openJournal(p))));
+        p.showDialog((DialogLike) this.dialog("&cСкасувати квест?",
+            List.of(this.para("Прогрес квесту «" + q.name + "» буде втрачено. Предмети, які вже віддані NPC, не повертаються.")),
+            List.of(), (DialogType) type));
+    }
+
+    private void notifyTitle(Player p, String main, String sub) {
+        if (!this.getConfig().getBoolean("notify.title", true)) {
+            return;
+        }
+        p.showTitle(net.kyori.adventure.title.Title.title(LEGACY.deserialize(main), LEGACY.deserialize(sub),
+            net.kyori.adventure.title.Title.Times.times(java.time.Duration.ofMillis(300L), java.time.Duration.ofSeconds(3L), java.time.Duration.ofMillis(800L))));
+    }
+
+    // ======================= v0.6.0: ЛІНІЙКИ КВЕСТІВ, ВИМОГИ, ВИДАВЕЦЬ =======================
+
+    /** Причина, чому квест зараз закритий для гравця; null = відкритий. */
+    private String blockReason(Player p, Quest q) {
+        if (q.minLevel > 0 && p.getLevel() < q.minLevel) {
+            return "потрібен рівень " + q.minLevel;
+        }
+        for (String rid : q.requires) {
+            QState st = this.stateOf(p, rid);
+            if (st == null || !"DONE".equals(st.status)) {
+                Quest r = this.quests.get(rid);
+                return "спершу виконай: " + (r == null ? rid : r.name);
+            }
+        }
+        for (String eid : q.excludes) {
+            if (this.stateOf(p, eid) != null) {
+                Quest e = this.quests.get(eid);
+                return "несумісний з квестом: " + (e == null ? eid : e.name);
+            }
+        }
+        return null;
+    }
+
+    private int lineDone(Player p, Line ln) {
+        int n = 0;
+        for (String qid : ln.quests) {
+            QState st = this.stateOf(p, qid);
+            if (st != null && "DONE".equals(st.status)) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /** Нагорода за повне проходження лінійки (один раз на гравця). */
+    private void checkLines(Player p) {
+        for (Line ln : this.lines.values()) {
+            if (ln.quests.isEmpty()) {
+                continue;
+            }
+            java.util.Set<String> done = this.linesDone.computeIfAbsent(p.getUniqueId(), k -> new java.util.HashSet<>());
+            if (done.contains(ln.id) || this.lineDone(p, ln) < ln.quests.size()) {
+                continue;
+            }
+            done.add(ln.id);
+            this.progressDirty = true;
+            p.sendMessage(this.text("&b&lЛінійку квестів завершено: &f" + ln.name));
+            this.notifyTitle(p, "&b&lЛінійку завершено!", "&f" + ln.name);
+            if (ln.xp > 0) {
+                p.giveExp(ln.xp);
+            }
+            for (String cmd : ln.commands) {
+                Bukkit.dispatchCommand((CommandSender) Bukkit.getConsoleSender(), cmd.replace("{player}", p.getName()));
+            }
+        }
+    }
+
+    // ---- для гравця ----
+
+    private void openLines(Player p) {
+        List<ActionButton> buttons = new ArrayList<>();
+        for (Line ln : this.lines.values()) {
+            buttons.add(this.btn(ln.name + " &7(" + this.lineDone(p, ln) + "/" + ln.quests.size() + ")",
+                v -> this.sync(() -> this.openLineView(p, ln))));
+        }
+        if (buttons.isEmpty()) {
+            this.openJournal(p);
+            return;
+        }
+        p.showDialog((DialogLike) this.dialog("&bЛінійки квестів",
+            List.of(this.para("Обери лінійку, щоб побачити її квести та прогрес.")), List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openJournal(p))), (int) 1)));
+    }
+
+    private void openLineView(Player p, Line ln) {
+        List<DialogBody> body = new ArrayList<>();
+        if (!ln.description.isBlank()) {
+            body.add(DialogBody.plainMessage((Component) this.fmt(ln.description, p)));
+        }
+        StringBuilder sb = new StringBuilder("&bКвести лінійки:");
+        int i = 1;
+        for (String qid : ln.quests) {
+            Quest q = this.quests.get(qid);
+            if (q == null) {
+                continue;
+            }
+            QState st = this.stateOf(p, qid);
+            String why = st == null ? this.blockReason(p, q) : null;
+            String mark;
+            if (st != null && "DONE".equals(st.status)) {
+                mark = "&a✔ &7";
+            } else if (st != null && "READY".equals(st.status)) {
+                mark = "&6! &f";
+            } else if (st != null) {
+                mark = "&e▶ &f";
+            } else {
+                mark = why != null ? "&8✖ &8" : "&f○ &f";
+            }
+            sb.append("\n").append(mark).append(i++).append(". ").append(q.name);
+            if (why != null) {
+                sb.append(" &7(").append(why).append(")");
+            }
+        }
+        body.add(DialogBody.plainMessage((Component) this.fmt(sb.toString(), p)));
+        List<String> rewards = new ArrayList<>();
+        if (ln.xp > 0) {
+            rewards.add(ln.xp + " досвіду");
+        }
+        if (!ln.commands.isEmpty()) {
+            rewards.add("особлива нагорода");
+        }
+        if (!rewards.isEmpty()) {
+            body.add(DialogBody.plainMessage((Component) this.fmt("&6Нагорода за всю лінійку: &f" + String.join(", ", rewards), p)));
+        }
+        p.showDialog((DialogLike) this.dialog("&b" + ln.name, body, List.of(),
+            (DialogType) DialogType.notice((ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openLines(p))))));
+    }
+
+    // ---- редактор вимог квесту ----
+
+    private void applyReq(Player p, Quest q, Function<String, String> v) {
+        List<String> req = new ArrayList<>();
+        for (String raw : QuestNPC.lines(v.apply("requires"))) {
+            String id = raw.toLowerCase(Locale.ROOT);
+            if (id.equals(q.id) || !this.quests.containsKey(id)) {
+                p.sendMessage(this.text("&cКвест пропущено у вимогах (немає такого id): &f" + raw));
+                continue;
+            }
+            req.add(id);
+        }
+        q.requires = req;
+        List<String> exc = new ArrayList<>();
+        for (String raw : QuestNPC.lines(v.apply("excludes"))) {
+            String id = raw.toLowerCase(Locale.ROOT);
+            if (id.equals(q.id) || !this.quests.containsKey(id)) {
+                p.sendMessage(this.text("&cКвест пропущено у несумісних (немає такого id): &f" + raw));
+                continue;
+            }
+            exc.add(id);
+        }
+        q.excludes = exc;
+        try {
+            q.minLevel = Math.max(0, Integer.parseInt(QuestNPC.clean(v.apply("minlevel"), "0")));
+        } catch (NumberFormatException ex) {
+            p.sendMessage(this.text("&cРівень має бути цілим числом - залишено попереднє значення."));
+        }
+        q.acceptReply = QuestNPC.clean(v.apply("acceptreply"), "");
+        q.declineReply = QuestNPC.clean(v.apply("declinereply"), "");
+        try {
+            q.giver = Integer.parseInt(QuestNPC.clean(v.apply("giver"), "-1"));
+            if (q.giver >= 0 && !this.npcs.containsKey(q.giver)) {
+                p.sendMessage(this.text("&eУвага: NPC #" + q.giver + " не існує."));
+            }
+        } catch (NumberFormatException ex) {
+            p.sendMessage(this.text("&c№ NPC має бути цілим числом - залишено попереднє значення."));
+        }
+    }
+
+    private void openReqEditor(Player p, Quest q) {
+        List<DialogInput> inputs = new ArrayList<>();
+        inputs.add(this.block("requires", "Вимоги: id квестів, які треба виконати раніше (кожен з нового рядка)", String.join("\n", q.requires), 400));
+        inputs.add(this.block("excludes", "Несумісні: якщо гравець узяв один з цих квестів, цей закривається (id, з нового рядка)", String.join("\n", q.excludes), 400));
+        inputs.add(this.line("minlevel", "Мінімальний рівень досвіду гравця (0 = без обмеження)", String.valueOf(q.minLevel), 4));
+        inputs.add(this.line("giver", "№ NPC, який видає квест (-1 = лише через кнопку в діалозі)", String.valueOf(q.giver), 5));
+        inputs.add(this.block("acceptreply", "Відповідь NPC, коли гравець приймає квест (порожньо = без відповіді)", q.acceptReply, 400));
+        inputs.add(this.block("declinereply", "Відповідь NPC, коли гравець відхиляє квест (порожньо = без відповіді)", q.declineReply, 400));
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(this.btn("&aЗберегти", v -> this.sync(() -> {
+            this.applyReq(p, q, v);
+            this.saveQuests();
+            p.sendMessage(this.text("&aВимоги збережено."));
+            this.openReqEditor(p, q);
+        })));
+        p.showDialog((DialogLike) this.dialog("&5Вимоги: " + q.name,
+            List.of(this.para("Усі id квестів: " + String.join(", ", this.quests.keySet()))),
+            inputs,
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openQuestEditor(p, q))), (int) 1)));
+    }
+
+    // ---- редактор лінійок ----
+
+    private void openLineAdmin(Player p) {
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(this.btn("&a+ Нова лінійка", v -> this.sync(() -> this.openLineNew(p))));
+        for (Line ln : this.lines.values()) {
+            buttons.add(this.btn(ln.name + " &8(" + ln.quests.size() + " кв.)", v -> this.sync(() -> this.openLineEditor(p, ln))));
+        }
+        p.showDialog((DialogLike) this.dialog("&bЛінійки квестів",
+            List.of(this.para("Лінійка - це група квестів з прогресом і нагородою за повне проходження.")), List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openQuestList(p))), (int) 1)));
+    }
+
+    private void openLineNew(Player p) {
+        ConfirmationType type = DialogType.confirmation(
+            (ActionButton) this.btn("&aСтворити", v -> this.sync(() -> {
+                String name = QuestNPC.clean(v.apply("linename"), "");
+                if (name.isEmpty()) {
+                    p.sendMessage(this.text("&cВведи назву лінійки."));
+                    this.openLineNew(p);
+                    return;
+                }
+                String base = QuestNPC.slug(name);
+                String id = base;
+                int i = 2;
+                while (this.lines.containsKey(id)) {
+                    id = base + "_" + i++;
+                }
+                Line ln = new Line();
+                ln.id = id;
+                ln.name = name;
+                this.lines.put(id, ln);
+                this.saveQuests();
+                p.sendMessage(this.text("&aЛінійку створено. Додай у неї квести."));
+                this.openLineEditor(p, ln);
+            })),
+            (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openLineAdmin(p))));
+        p.showDialog((DialogLike) this.dialog("&bНова лінійка",
+            List.of(this.para("Достатньо написати назву, id створиться автоматично.")),
+            List.of(this.line("linename", "Назва лінійки", "", 60)),
+            (DialogType) type));
+    }
+
+    private void applyLine(Player p, Line ln, Function<String, String> v) {
+        ln.name = QuestNPC.clean(v.apply("linename"), ln.id);
+        ln.description = QuestNPC.clean(v.apply("linedesc"), "");
+        try {
+            ln.xp = Math.max(0, Integer.parseInt(QuestNPC.clean(v.apply("linexp"), "0")));
+        } catch (NumberFormatException ex) {
+            p.sendMessage(this.text("&cДосвід має бути цілим числом - залишено попереднє значення."));
+        }
+        List<String> cmds = new ArrayList<>();
+        for (String c : QuestNPC.lines(v.apply("linecmds"))) {
+            cmds.add(c.startsWith("/") ? c.substring(1) : c);
+        }
+        ln.commands = cmds;
+    }
+
+    private void openLineEditor(Player p, Line ln) {
+        List<DialogInput> inputs = new ArrayList<>();
+        inputs.add(this.line("linename", "Назва лінійки", ln.name, 60));
+        inputs.add(this.block("linedesc", "Опис лінійки", ln.description, 500));
+        inputs.add(this.line("linexp", "Нагорода за всю лінійку: досвід", String.valueOf(ln.xp), 7));
+        inputs.add(this.block("linecmds", "Нагорода за всю лінійку: команди від консолі ({player} = нік, по одній в рядок)", String.join("\n", ln.commands), 500));
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(this.btn("&aЗберегти", v -> this.sync(() -> {
+            this.applyLine(p, ln, v);
+            this.saveQuests();
+            p.sendMessage(this.text("&aЛінійку збережено."));
+            this.openLineEditor(p, ln);
+        })));
+        buttons.add(this.btn("Квести лінійки: " + ln.quests.size(), v -> this.sync(() -> {
+            this.applyLine(p, ln, v);
+            this.saveQuests();
+            this.openLineQuests(p, ln);
+        })));
+        buttons.add(this.btn("&cВидалити лінійку", v -> this.sync(() -> {
+            ConfirmationType type = DialogType.confirmation(
+                (ActionButton) this.btn("&cТак, видалити", v2 -> this.sync(() -> {
+                    this.lines.remove(ln.id);
+                    this.saveQuests();
+                    p.sendMessage(this.text("&aЛінійку видалено (квести лишились)."));
+                    this.openLineAdmin(p);
+                })),
+                (ActionButton) this.btn("&7Ні", v2 -> this.sync(() -> this.openLineEditor(p, ln))));
+            p.showDialog((DialogLike) this.dialog("&cВидалити лінійку?",
+                List.of(this.para("Лінійка «" + ln.name + "» буде видалена. Самі квести не видаляються.")),
+                List.of(), (DialogType) type));
+        })));
+        p.showDialog((DialogLike) this.dialog("&bЛінійка: " + ln.id, List.of(this.para("Порядок квестів у лінійці такий, в якому ти їх додаєш. Щоб змінити порядок, прибери й додай квест знову. Обмеження \"хто за ким\" задаються у вимогах самого квесту.")),
+            inputs,
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openLineAdmin(p))), (int) 1)));
+    }
+
+    private void openLineQuests(Player p, Line ln) {
+        List<ActionButton> buttons = new ArrayList<>();
+        for (Quest q : this.quests.values()) {
+            int pos = ln.quests.indexOf(q.id);
+            buttons.add(this.btn((pos >= 0 ? "&a[" + (pos + 1) + "] " : "&7[ ] ") + "&f" + q.name, v -> this.sync(() -> {
+                if (!ln.quests.remove(q.id)) {
+                    ln.quests.add(q.id);
+                }
+                this.saveQuests();
+                this.openLineQuests(p, ln);
+            })));
+        }
+        if (buttons.isEmpty()) {
+            p.sendMessage(this.text("&cСпершу створи квести."));
+            this.openLineEditor(p, ln);
+            return;
+        }
+        p.showDialog((DialogLike) this.dialog("&bКвести лінійки: " + ln.name,
+            List.of(this.para("Натисни квест, щоб додати його в лінійку або прибрати. Цифра - номер у лінійці.")), List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openLineEditor(p, ln))), (int) 1)));
+    }
+
+    // ======================= v0.6.1: ЗНАКИ НАД NPC, ЩОДЕННІ КВЕСТИ, ЛІМІТИ, ДУБЛЮВАННЯ =======================
+
+    private final Map<UUID, Map<Integer, org.bukkit.entity.TextDisplay>> markers = new HashMap<>();
+    private final Map<UUID, Integer> bubbleNpc = new HashMap<>();
+
+    private java.time.ZoneId zone() {
+        String z = this.getConfig().getString("daily.timezone", "");
+        try {
+            return z == null || z.isBlank() ? java.time.ZoneId.systemDefault() : java.time.ZoneId.of(z);
+        } catch (java.time.DateTimeException ex) {
+            return java.time.ZoneId.systemDefault();
+        }
+    }
+
+    /** Скільки мс лишилось до найближчого щоденного оновлення після виконання квесту. */
+    private long dailyLeft(Quest q, QState st) {
+        java.time.ZoneId zone = this.zone();
+        java.time.ZonedDateTime done = java.time.Instant.ofEpochMilli(st.doneAt).atZone(zone);
+        java.time.ZonedDateTime next = done.toLocalDate().atTime(q.dailyReset / 60, q.dailyReset % 60).atZone(zone);
+        if (!next.isAfter(done)) {
+            next = next.plusDays(1L);
+        }
+        return Math.max(0L, next.toInstant().toEpochMilli() - System.currentTimeMillis());
+    }
+
+    private static String hhmm(int minutes) {
+        return String.format(Locale.ROOT, "%02d:%02d", minutes / 60, minutes % 60);
+    }
+
+    /** ГГ:ХХ у хвилини від півночі; -1 = порожньо, -2 = неправильний формат. */
+    private static int parseHhmm(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return -1;
+        }
+        String[] part = raw.trim().replace('.', ':').split(":");
+        try {
+            int h = Integer.parseInt(part[0].trim());
+            int m = part.length > 1 ? Integer.parseInt(part[1].trim()) : 0;
+            if (h < 0 || h > 23 || m < 0 || m > 59) {
+                return -2;
+            }
+            return h * 60 + m;
+        } catch (NumberFormatException ex) {
+            return -2;
+        }
+    }
+
+    private static String clock(long s) {
+        if (s >= 3600L) {
+            return String.format(Locale.ROOT, "%d:%02d:%02d", s / 3600L, s % 3600L / 60L, s % 60L);
+        }
+        return String.format(Locale.ROOT, "%d:%02d", s / 60L, s % 60L);
+    }
+
+    private int activeCount(Player p) {
+        Map<String, QState> m = this.progress.get(p.getUniqueId());
+        int n = 0;
+        if (m != null) {
+            for (QState st : m.values()) {
+                if ("ACTIVE".equals(st.status)) {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    private boolean limitReached(Player p) {
+        int max = this.getConfig().getInt("quest.max-active", 0);
+        return max > 0 && this.activeCount(p) >= max;
+    }
+
+    /** Квести з ліміту часу: якщо час вийшов, квест провалено й скинуто. */
+    private void checkTimeouts(Player p) {
+        Map<String, QState> m = this.progress.get(p.getUniqueId());
+        if (m == null) {
+            return;
+        }
+        for (Map.Entry<String, QState> en : new ArrayList<Map.Entry<String, QState>>(m.entrySet())) {
+            QState st = en.getValue();
+            Quest q = this.quests.get(en.getKey());
+            if (q == null || q.timeLimit <= 0L || !"ACTIVE".equals(st.status) || st.startedAt <= 0L) {
+                continue;
+            }
+            if (System.currentTimeMillis() - st.startedAt < q.timeLimit * 1000L) {
+                continue;
+            }
+            m.remove(q.id);
+            this.progressDirty = true;
+            p.sendMessage(this.text("&c&lЧас вийшов! &7Квест провалено: &f" + q.name + "&7. Його можна взяти знову."));
+            this.notifyTitle(p, "&c&lКвест провалено", "&f" + q.name);
+            p.playSound(p.getLocation(), Sound.ENTITY_VILLAGER_NO, 1.0f, 0.8f);
+        }
+    }
+
+    private Quest copyQuest(Quest q) {
+        String base = q.id + "_copy";
+        String id = base;
+        int i = 2;
+        while (this.quests.containsKey(id)) {
+            id = base + "_" + i++;
+        }
+        Quest c = new Quest();
+        c.id = id;
+        c.name = q.name + " (копія)";
+        c.description = q.description;
+        c.repeatable = q.repeatable;
+        c.turnIn = q.turnIn;
+        c.cooldown = q.cooldown;
+        c.dailyReset = q.dailyReset;
+        c.timeLimit = q.timeLimit;
+        c.requires = new ArrayList<>(q.requires);
+        c.excludes = new ArrayList<>(q.excludes);
+        c.minLevel = q.minLevel;
+        c.giver = -1;
+        c.xp = q.xp;
+        c.items = new ArrayList<>(q.items);
+        c.stacks = new ArrayList<>(q.stacks);
+        c.commands = new ArrayList<>(q.commands);
+        c.acceptReply = q.acceptReply;
+        c.declineReply = q.declineReply;
+        for (Stage s0 : q.stages) {
+            Stage s1 = new Stage();
+            s1.type = s0.type;
+            s1.text = s0.text;
+            s1.world = s0.world;
+            s1.x = s0.x;
+            s1.y = s0.y;
+            s1.z = s0.z;
+            s1.radius = s0.radius;
+            s1.height = s0.height;
+            s1.entity = s0.entity;
+            s1.amount = s0.amount;
+            s1.material = s0.material;
+            s1.npc = s0.npc;
+            s1.stack = s0.stack;
+            s1.reply = s0.reply;
+            s1.replyFail = s0.replyFail;
+            c.stages.add(s1);
+        }
+        return c;
+    }
+
+    // ---- знаки «!» і «?» над NPC (кожен гравець бачить свої) ----
+
+    private void collectByPrefix(Node node, String prefix, java.util.Set<String> out) {
+        for (Choice c : node.choices) {
+            String a = c.action == null ? "" : c.action.trim().toLowerCase(Locale.ROOT);
+            if (a.startsWith(prefix)) {
+                out.add(a.substring(prefix.length()).trim());
+            }
+            if (c.next != null) {
+                this.collectByPrefix(c.next, prefix, out);
+            }
+        }
+    }
+
+    /** 0 = немає знака, 1 = «!» (є новий квест), 2 = золоте «?» (є що здати), 3 = сіре «?» (квест веде до цього NPC). */
+    private int markerState(Player p, Npc n) {
+        Map<String, QState> m = this.progress.get(p.getUniqueId());
+        java.util.Set<String> turn = new java.util.LinkedHashSet<>();
+        java.util.Set<String> offer = new java.util.LinkedHashSet<>();
+        this.collectByPrefix(n.root, "turnin:", turn);
+        this.collectByPrefix(n.root, "quest:", offer);
+        for (Quest gq : this.quests.values()) {
+            if (gq.giver == n.id) {
+                offer.add(gq.id);
+                turn.add(gq.id);
+            }
+        }
+        if (m != null) {
+            for (String id : turn) {
+                QState st = m.get(id);
+                if (st != null && "READY".equals(st.status)) {
+                    return 2;
+                }
+            }
+        }
+        for (String id : offer) {
+            Quest q = this.quests.get(id);
+            if (q != null && this.canStart(p, q)) {
+                return 1;
+            }
+        }
+        if (m != null) {
+            for (Map.Entry<String, QState> en : m.entrySet()) {
+                Quest q = this.quests.get(en.getKey());
+                QState st = en.getValue();
+                if (q == null || !"ACTIVE".equals(st.status) || st.stage >= q.stages.size()) {
+                    continue;
+                }
+                if (q.stages.get(st.stage).npc == n.id) {
+                    return 3;
+                }
+            }
+        }
+        return 0;
+    }
+
+    private void updateMarkers(Player p) {
+        UUID id = p.getUniqueId();
+        boolean on = this.getConfig().getBoolean("markers.enabled", true);
+        double range = this.getConfig().getDouble("markers.range", 32.0);
+        double offset = this.getConfig().getDouble("markers.height-offset", 0.9);
+        Map<Integer, org.bukkit.entity.TextDisplay> mine = this.markers.computeIfAbsent(id, k -> new HashMap<>());
+        java.util.Set<Integer> keep = new java.util.HashSet<>();
+        if (on) {
+            for (Npc n : this.npcs.values()) {
+                if (n.loc == null || n.loc.getWorld() == null || n.entity == null || !n.loc.getWorld().equals(p.getWorld())) {
+                    continue;
+                }
+                if (n.loc.distanceSquared(p.getLocation()) > range * range) {
+                    continue;
+                }
+                if (!n.loc.getWorld().isChunkLoaded(n.loc.getBlockX() >> 4, n.loc.getBlockZ() >> 4)) {
+                    continue;
+                }
+                int state = this.markerState(p, n);
+                Integer bn = this.bubbleNpc.get(id);
+                if (state == 0 || bn != null && bn == n.id && this.bubbles.containsKey(id)) {
+                    continue;
+                }
+                Entity ent = n.loc.getWorld().getEntity(n.entity);
+                if (!(ent instanceof Mannequin)) {
+                    continue;
+                }
+                Location at = ent.getLocation().add(0.0, ent.getHeight() + offset, 0.0);
+                final Component label = LEGACY.deserialize(state == 1 ? "&e&l!" : state == 2 ? "&6&l?" : "&7&l?");
+                org.bukkit.entity.TextDisplay d = mine.get(n.id);
+                if (d == null || !d.isValid()) {
+                    d = ent.getWorld().spawn(at, org.bukkit.entity.TextDisplay.class, d0 -> {
+                        d0.setPersistent(false);
+                        d0.setVisibleByDefault(false);
+                        d0.text(label);
+                        d0.setBillboard(org.bukkit.entity.Display.Billboard.CENTER);
+                        d0.setBackgroundColor(org.bukkit.Color.fromARGB(0, 0, 0, 0));
+                        d0.setShadowed(true);
+                        d0.setTransformation(new org.bukkit.util.Transformation(new org.joml.Vector3f(), new org.joml.AxisAngle4f(),
+                            new org.joml.Vector3f(2.0f, 2.0f, 2.0f), new org.joml.AxisAngle4f()));
+                    });
+                    p.showEntity(this, d);
+                    mine.put(n.id, d);
+                } else {
+                    d.text(label);
+                    if (d.getLocation().distanceSquared(at) > 0.01) {
+                        d.teleport(at);
+                    }
+                }
+                keep.add(n.id);
+            }
+        }
+        java.util.Iterator<Map.Entry<Integer, org.bukkit.entity.TextDisplay>> it = mine.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Integer, org.bukkit.entity.TextDisplay> en = it.next();
+            if (!keep.contains(en.getKey())) {
+                if (en.getValue().isValid()) {
+                    en.getValue().remove();
+                }
+                it.remove();
+            }
+        }
+    }
+
+    private void removeMarkers(Player p) {
+        Map<Integer, org.bukkit.entity.TextDisplay> mine = this.markers.remove(p.getUniqueId());
+        if (mine != null) {
+            for (org.bukkit.entity.TextDisplay d : mine.values()) {
+                if (d.isValid()) {
+                    d.remove();
+                }
+            }
+        }
+    }
+
     private Npc byArg(String[] a) {
         if (a.length < 2) {
             return null;
@@ -2772,6 +3633,14 @@ TabExecutor {
         boolean repeatable;
         boolean turnIn;
         long cooldown = 0L;
+        List<String> requires = new ArrayList<String>();
+        List<String> excludes = new ArrayList<String>();
+        int minLevel = 0;
+        int giver = -1;
+        int dailyReset = -1;
+        long timeLimit = 0L;
+        String acceptReply = "";
+        String declineReply = "";
         final List<Stage> stages = new ArrayList<Stage>();
         int xp;
         List<String> items = new ArrayList<String>();
@@ -2782,11 +3651,24 @@ TabExecutor {
         }
     }
 
+    static final class Line {
+        String id;
+        String name;
+        String description = "";
+        int xp;
+        List<String> commands = new ArrayList<String>();
+        List<String> quests = new ArrayList<String>();
+
+        Line() {
+        }
+    }
+
     static final class QState {
         String status = "ACTIVE";
         int stage = 0;
         int count = 0;
         long doneAt = 0L;
+        long startedAt = 0L;
 
         QState() {
         }
