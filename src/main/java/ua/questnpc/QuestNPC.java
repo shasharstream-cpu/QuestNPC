@@ -261,7 +261,7 @@ TabExecutor {
     }
 
     private DialogInput block(String key, String label, String initial, int maxLength) {
-        return DialogInput.text((String)key, (Component)Component.text((String)label)).width(300).initial(initial == null ? "" : initial).maxLength(maxLength).multiline(TextDialogInput.MultilineOptions.create((Integer)6, (Integer)90)).build();
+        return DialogInput.text((String)key, (Component)Component.text((String)label)).width(300).initial(initial == null ? "" : initial).maxLength(maxLength).multiline(TextDialogInput.MultilineOptions.create((Integer)null, (Integer)120)).build();
     }
 
     private ItemStack createWand() {
@@ -1831,14 +1831,14 @@ TabExecutor {
                     sg.material = m;
                     sg.amount = Math.max(1, Integer.parseInt(QuestNPC.clean(v.apply("amount"), "1")));
                     sg.npc = Integer.parseInt(QuestNPC.clean(v.apply("npc"), "-1"));
-                    if (!this.npcs.containsKey(sg.npc)) {
+                    if (sg.npc >= 0 && !this.npcs.containsKey(sg.npc)) {
                         p.sendMessage(this.text("&eУвага: NPC #" + sg.npc + " не існує."));
                     }
                 }
                 case "item" -> {
                     sg.amount = Math.max(1, Integer.parseInt(QuestNPC.clean(v.apply("amount"), "1")));
                     sg.npc = Integer.parseInt(QuestNPC.clean(v.apply("npc"), "-1"));
-                    if (!this.npcs.containsKey(sg.npc)) {
+                    if (sg.npc >= 0 && !this.npcs.containsKey(sg.npc)) {
                         p.sendMessage(this.text("&eУвага: NPC #" + sg.npc + " не існує."));
                     }
                 }
@@ -1883,11 +1883,11 @@ TabExecutor {
             case "deliver" -> {
                 inputs.add(this.line("material", "Предмет (напр. DIAMOND)", sg.material == null ? "" : sg.material.name(), 40));
                 inputs.add(this.line("amount", "Кількість", String.valueOf(sg.amount), 5));
-                inputs.add(this.line("npc", "№ NPC, якому віддати", String.valueOf(sg.npc), 5));
+                inputs.add(this.line("npc", "№ NPC, якому віддати (-1 = забрати з інвентаря автоматично)", String.valueOf(sg.npc), 5));
             }
             case "item" -> {
                 inputs.add(this.line("amount", "Кількість", String.valueOf(sg.amount), 5));
-                inputs.add(this.line("npc", "№ NPC, якому віддати", String.valueOf(sg.npc), 5));
+                inputs.add(this.line("npc", "№ NPC, якому віддати (-1 = забрати з інвентаря автоматично)", String.valueOf(sg.npc), 5));
             }
             case "talk" -> inputs.add(this.line("npc", "№ NPC, з яким поговорити", String.valueOf(sg.npc), 5));
             default -> { }
@@ -2516,6 +2516,7 @@ TabExecutor {
 
     private void updateTrackers() {
         for (Player p : Bukkit.getOnlinePlayers()) {
+            this.autoCollect(p);
             this.updateTracker(p);
         }
     }
@@ -2533,7 +2534,7 @@ TabExecutor {
             return;
         }
         QState st = this.progress.get(id).get(q.id);
-        Component title = LEGACY.deserialize("&6" + q.name + " &8» " + this.describe(p, q, st));
+        Component title = LEGACY.deserialize("&6&l" + q.name + " &8▸ ").append(this.describeC(p, q, st));
         float prog = this.questFraction(p, q, st);
         net.kyori.adventure.bossbar.BossBar.Color color = "READY".equals(st.status)
             ? net.kyori.adventure.bossbar.BossBar.Color.GREEN : net.kyori.adventure.bossbar.BossBar.Color.YELLOW;
@@ -2569,7 +2570,7 @@ TabExecutor {
                     continue;
                 }
                 String desc = q.description.isBlank() ? "" : "\n&7" + q.description;
-                body.add(this.para((q == tq ? "&e★ " : "") + "&6&l" + q.name + desc + "\n" + this.describe(p, q, st)));
+                body.add(DialogBody.plainMessage(LEGACY.deserialize((q == tq ? "&e★ " : "") + "&6&l" + q.name + desc + "\n").append(this.describeC(p, q, st))));
                 if (q != tq) {
                     buttons.add(this.btn("&eВідстежувати: " + q.name, v -> this.sync(() -> {
                         this.tracked.put(id, q.id);
@@ -2593,6 +2594,103 @@ TabExecutor {
         })));
         p.showDialog((DialogLike) this.dialog("&6Журнал квестів", body, List.of(),
             (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Закрити", null), (int) 1)));
+    }
+
+    // ======================= v0.5.2: АВТОЗБІР ПРЕДМЕТІВ, ГАРНИЙ ОПИС ЕТАПУ =======================
+
+    private Component npcSuffix(int id) {
+        Npc n = this.npcs.get(id);
+        return n == null ? Component.empty() : LEGACY.deserialize(" &8→ &7" + n.name);
+    }
+
+    /** Опис поточного етапу для панелі та журналу: з перекладеними назвами предметів і прогресом. */
+    private Component describeC(Player p, Quest q, QState st) {
+        if ("READY".equals(st.status)) {
+            return LEGACY.deserialize("&aУсе виконано. Віддай квест NPC.");
+        }
+        if (st.stage >= q.stages.size()) {
+            return Component.empty();
+        }
+        Stage sg = q.stages.get(st.stage);
+        Component out = LEGACY.deserialize("&f" + sg.text);
+        if (sg.type.equals("kill")) {
+            return out.append(LEGACY.deserialize(" &7(" + st.count + "/" + sg.amount + ")"));
+        }
+        if (sg.type.equals("deliver") || sg.type.equals("item")) {
+            Component name = Component.text("?");
+            int have = 0;
+            try {
+                if (sg.type.equals("deliver") && sg.material != null) {
+                    Material mat = sg.material;
+                    name = Component.translatable(mat.translationKey());
+                    have = this.countStack(p, it -> it.getType() == mat);
+                } else if (sg.type.equals("item")) {
+                    ItemStack tpl = this.stackOf(sg.stack);
+                    ItemMeta im = tpl.getItemMeta();
+                    name = im != null && im.hasDisplayName() ? im.displayName() : Component.translatable(tpl.getType().translationKey());
+                    have = this.countStack(p, it -> it.isSimilar(tpl));
+                }
+            } catch (RuntimeException ex) {
+                name = Component.text("?");
+            }
+            return out.append(LEGACY.deserialize(" &7(" + Math.min(have, sg.amount) + "/" + sg.amount + " "))
+                .append(name.colorIfAbsent(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                .append(LEGACY.deserialize("&7)"))
+                .append(this.npcSuffix(sg.npc));
+        }
+        if (sg.type.equals("talk")) {
+            return out.append(this.npcSuffix(sg.npc));
+        }
+        return LEGACY.deserialize(this.describe(p, q, st));
+    }
+
+    /** Етапи з предметами без NPC (№ NPC = -1): предмети автоматично забираються з інвентаря. */
+    private void autoCollect(Player p) {
+        Map<String, QState> m = this.progress.get(p.getUniqueId());
+        if (m == null) {
+            return;
+        }
+        for (Map.Entry<String, QState> en : new ArrayList<Map.Entry<String, QState>>(m.entrySet())) {
+            QState st = en.getValue();
+            Quest q = this.quests.get(en.getKey());
+            if (q == null || !"ACTIVE".equals(st.status) || st.stage >= q.stages.size()) {
+                continue;
+            }
+            Stage sg = q.stages.get(st.stage);
+            if (sg.npc >= 0) {
+                continue;
+            }
+            ItemStack take = null;
+            String label = "";
+            if (sg.type.equals("deliver") && sg.material != null) {
+                if (p.getInventory().containsAtLeast(new ItemStack(sg.material), sg.amount)) {
+                    take = new ItemStack(sg.material, sg.amount);
+                    label = sg.material.name();
+                }
+            } else if (sg.type.equals("item")) {
+                try {
+                    ItemStack tpl = this.stackOf(sg.stack);
+                    ItemStack one = tpl.clone();
+                    one.setAmount(1);
+                    if (p.getInventory().containsAtLeast(one, sg.amount)) {
+                        take = tpl;
+                        take.setAmount(sg.amount);
+                        label = this.stackLabel(sg);
+                    }
+                } catch (RuntimeException ex) {
+                    continue;
+                }
+            }
+            if (take == null) {
+                continue;
+            }
+            p.getInventory().removeItem(new ItemStack[]{take});
+            p.sendMessage(this.text("&7З інвентаря забрано: &f" + sg.amount + " x " + label));
+            this.advance(p, q, st);
+            if (!sg.reply.isBlank()) {
+                p.sendMessage(this.fmt(sg.reply, p));
+            }
+        }
     }
 
     private Npc byArg(String[] a) {
