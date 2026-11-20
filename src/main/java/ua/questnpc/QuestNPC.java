@@ -151,7 +151,15 @@ public final class QuestNPC
 extends JavaPlugin
 implements Listener,
 TabExecutor {
-    private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacyAmpersand();
+    private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.builder().character('&').hexColors().build();
+
+    /** Кольоровий текст: &-коди, hex &#RRGGBB або MiniMessage (напр. <gradient:#ff0000:#0000ff>Ім'я</gradient>). */
+    static Component colored(String s) {
+        if (s != null && s.indexOf('<') >= 0 && s.indexOf('>') > s.indexOf('<') && s.indexOf('&') < 0) {
+            return net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(s);
+        }
+        return LEGACY.deserialize(s == null ? "" : s);
+    }
     private static final ClickCallback.Options CLICK_OPTS = (ClickCallback.Options)ClickCallback.Options.builder().uses(1).lifetime((TemporalAmount)Duration.ofMinutes(30L)).build();
     private static final int MAX_CHOICES = 5;
     private static final int MAX_TRADES = 18;
@@ -252,7 +260,7 @@ TabExecutor {
     }
 
     private Dialog dialog(String title, List<DialogBody> body, List<DialogInput> inputs, DialogType type) {
-        return Dialog.create(factory -> ((DialogRegistryEntry.Builder)factory.empty()).base(DialogBase.builder((Component)LEGACY.deserialize(title)).canCloseWithEscape(true).body(body).inputs(inputs).build()).type(type));
+        return Dialog.create(factory -> ((DialogRegistryEntry.Builder)factory.empty()).base(DialogBase.builder((Component)QuestNPC.colored(title)).canCloseWithEscape(true).body(body).inputs(inputs).build()).type(type));
     }
 
     private DialogBody para(String legacy) {
@@ -326,7 +334,7 @@ TabExecutor {
 
     private void setup(Mannequin m, Npc n) {
         m.getPersistentDataContainer().set(this.npcKey, PersistentDataType.INTEGER, n.id);
-        m.customName((Component)LEGACY.deserialize(n.name));
+        m.customName((Component)QuestNPC.colored(n.name));
         m.setCustomNameVisible(true);
         m.setDescription(null);
         m.setImmovable(true);
@@ -439,8 +447,9 @@ TabExecutor {
             buttons.add(this.btn("&e< Меню", v -> this.sync(() -> this.openHub(p, n))));
         }
         DialogType type = buttons.isEmpty() ? DialogType.notice((ActionButton)this.btn("&7\u0417\u0430\u043a\u0440\u0438\u0442\u0438", null)) : DialogType.multiAction(buttons, (ActionButton)this.btn("&7\u0417\u0430\u043a\u0440\u0438\u0442\u0438", null), (int)1);
-        this.showBubble(p, n, node.text);
-        p.showDialog((DialogLike)this.dialog(n.name, List.of(DialogBody.plainMessage((Component)this.fmt(node.text, p))), List.of(), (DialogType)type));
+        String shown = this.nodeText(p, node);
+        this.showBubble(p, n, shown);
+        p.showDialog((DialogLike)this.dialog(n.name, List.of(DialogBody.plainMessage((Component)this.fmt(shown, p))), List.of(), (DialogType)type));
     }
 
     private void runChoice(Player p, Npc n, Node node, Choice c) {
@@ -531,7 +540,7 @@ TabExecutor {
             Npc n = this.createNpc(QuestNPC.clean((String)v.apply("name"), "NPC"), QuestNPC.clean((String)v.apply("skin"), ""), loc);
             p.sendMessage(this.text("&aNPC #" + n.id + " \u0441\u0442\u0432\u043e\u0440\u0435\u043d\u043e. \u041f\u041a\u041c \u043f\u043e \u043d\u044c\u043e\u043c\u0443 \u0437 \u041c\u0456\u0437\u043a\u043e\u043f\u0440\u0430\u0432\u043e\u043c - \u043d\u0430\u043b\u0430\u0448\u0442\u0443\u0432\u0430\u043d\u043d\u044f."));
         })), (ActionButton)this.btn("&c\u0421\u043a\u0430\u0441\u0443\u0432\u0430\u0442\u0438", null));
-        p.showDialog((DialogLike)this.dialog("&5\u0421\u0442\u0432\u043e\u0440\u0435\u043d\u043d\u044f NPC", List.of(this.para("NPC \u0437'\u044f\u0432\u0438\u0442\u044c\u0441\u044f \u043d\u0430 \u0432\u0438\u0431\u0440\u0430\u043d\u043e\u043c\u0443 \u043c\u0456\u0441\u0446\u0456. \u0421\u043a\u0456\u043d \u0431\u0435\u0440\u0435\u0442\u044c\u0441\u044f \u0437\u0430 \u043d\u0456\u043a\u043e\u043c \u0433\u0440\u0430\u0432\u0446\u044f (\u043f\u043e\u0442\u0440\u0456\u0431\u0435\u043d \u043e\u043d\u043b\u0430\u0439\u043d-\u0440\u0435\u0436\u0438\u043c \u0441\u0435\u0440\u0432\u0435\u0440\u0430).")), List.of(this.line("name", "\u0406\u043c'\u044f NPC (\u043c\u043e\u0436\u043d\u0430 \u0437 &-\u043a\u043e\u043b\u044c\u043e\u0440\u0430\u043c\u0438)", "\u041d\u043e\u0432\u0438\u0439 NPC", 32), this.line("skin", "\u0421\u043a\u0456\u043d: \u043d\u0456\u043a \u0433\u0440\u0430\u0432\u0446\u044f", p.getName(), 16)), (DialogType)type));
+        p.showDialog((DialogLike)this.dialog("&5\u0421\u0442\u0432\u043e\u0440\u0435\u043d\u043d\u044f NPC", List.of(this.para("NPC \u0437'\u044f\u0432\u0438\u0442\u044c\u0441\u044f \u043d\u0430 \u0432\u0438\u0431\u0440\u0430\u043d\u043e\u043c\u0443 \u043c\u0456\u0441\u0446\u0456. \u0421\u043a\u0456\u043d \u0431\u0435\u0440\u0435\u0442\u044c\u0441\u044f \u0437\u0430 \u043d\u0456\u043a\u043e\u043c \u0433\u0440\u0430\u0432\u0446\u044f (\u043f\u043e\u0442\u0440\u0456\u0431\u0435\u043d \u043e\u043d\u043b\u0430\u0439\u043d-\u0440\u0435\u0436\u0438\u043c \u0441\u0435\u0440\u0432\u0435\u0440\u0430).")), List.of(this.line("name", "Ім'я NPC (&-кольори, &#RRGGBB або <gradient:#f00:#00f>...)", "\u041d\u043e\u0432\u0438\u0439 NPC", 150), this.line("skin", "\u0421\u043a\u0456\u043d: \u043d\u0456\u043a \u0433\u0440\u0430\u0432\u0446\u044f", p.getName(), 16)), (DialogType)type));
     }
 
     private void openSettings(Player p, Npc n) {
@@ -559,7 +568,7 @@ TabExecutor {
             n.skin = newSkin;
             Mannequin m = this.entityOf(n);
             if (m != null) {
-                m.customName((Component)LEGACY.deserialize(n.name));
+                m.customName((Component)QuestNPC.colored(n.name));
             }
             if (skinChanged) {
                 this.applySkin(n);
@@ -568,7 +577,7 @@ TabExecutor {
             p.sendMessage(this.text("&a\u0417\u0431\u0435\u0440\u0435\u0436\u0435\u043d\u043e."));
             this.openSettings(p, n);
         })), (ActionButton)this.btn("&7\u041d\u0430\u0437\u0430\u0434", v -> this.sync(() -> this.openSettings(p, n))));
-        p.showDialog((DialogLike)this.dialog("&5\u0406\u043c'\u044f \u0442\u0430 \u0441\u043a\u0456\u043d", List.of(this.para("\u0421\u043a\u0456\u043d \u0431\u0435\u0440\u0435\u0442\u044c\u0441\u044f \u0437\u0430 \u043d\u0456\u043a\u043e\u043c \u0433\u0440\u0430\u0432\u0446\u044f (\u043f\u043e\u0442\u0440\u0456\u0431\u0435\u043d \u043e\u043d\u043b\u0430\u0439\u043d-\u0440\u0435\u0436\u0438\u043c \u0441\u0435\u0440\u0432\u0435\u0440\u0430).")), List.of(this.line("name", "\u0406\u043c'\u044f NPC", n.name, 32), this.line("skin", "\u0421\u043a\u0456\u043d: \u043d\u0456\u043a \u0433\u0440\u0430\u0432\u0446\u044f", n.skin, 16)), (DialogType)type));
+        p.showDialog((DialogLike)this.dialog("&5\u0406\u043c'\u044f \u0442\u0430 \u0441\u043a\u0456\u043d", List.of(this.para("\u0421\u043a\u0456\u043d \u0431\u0435\u0440\u0435\u0442\u044c\u0441\u044f \u0437\u0430 \u043d\u0456\u043a\u043e\u043c \u0433\u0440\u0430\u0432\u0446\u044f (\u043f\u043e\u0442\u0440\u0456\u0431\u0435\u043d \u043e\u043d\u043b\u0430\u0439\u043d-\u0440\u0435\u0436\u0438\u043c \u0441\u0435\u0440\u0432\u0435\u0440\u0430).")), List.of(this.line("name", "Ім'я NPC (&-кольори, &#RRGGBB або <gradient:#f00:#00f>...)", n.name, 150), this.line("skin", "\u0421\u043a\u0456\u043d: \u043d\u0456\u043a \u0433\u0440\u0430\u0432\u0446\u044f", n.skin, 16)), (DialogType)type));
     }
 
     private String path(Node node) {
@@ -586,6 +595,8 @@ TabExecutor {
         ArrayList<Choice> old = new ArrayList<Choice>(node.choices);
         ArrayList<DialogInput> inputs = new ArrayList<DialogInput>();
         inputs.add(this.block("text", node.parent == null ? "\u041f\u0440\u0438\u0432\u0456\u0442\u0430\u043d\u043d\u044f (\u043f\u0435\u0440\u0448\u0430 \u0440\u0435\u043f\u043b\u0456\u043a\u0430 NPC)" : "\u0429\u043e \u043a\u0430\u0436\u0435 NPC", node.text, 1000));
+        inputs.add(this.block("again", "Репліка NPC при повторній розмові (порожньо = завжди та сама)", node.again, 600));
+        inputs.add(this.line("againcd", "Повторна репліка діє (напр. 10m, 1h, 1d; 0 = завжди після першого разу)", node.againCd > 0L ? node.againCd + "s" : "0", 12));
         for (int i = 0; i < 5; ++i) {
             Choice c = i < old.size() ? (Choice)old.get(i) : null;
             inputs.add(this.line("label" + i, "\u0412\u0430\u0440\u0456\u0430\u043d\u0442 " + (i + 1) + ": \u0442\u0435\u043a\u0441\u0442 \u043a\u043d\u043e\u043f\u043a\u0438 (\u043f\u043e\u0440\u043e\u0436\u043d\u044c\u043e = \u043d\u0435\u043c\u0430)", c == null ? "" : c.label, 40));
@@ -622,6 +633,8 @@ TabExecutor {
 
     private void applyNode(Node node, List<Choice> old, Function<String, String> v) {
         node.text = QuestNPC.clean(v.apply("text"), "...");
+        node.again = QuestNPC.clean(v.apply("again"), "");
+        node.againCd = QuestNPC.parseDuration(v.apply("againcd"));
         ArrayList<Choice> result = new ArrayList<Choice>();
         for (int i = 0; i < 5; ++i) {
             String label = QuestNPC.clean(v.apply("label" + i), "");
@@ -696,7 +709,7 @@ TabExecutor {
             p.sendMessage(this.text("&7\u0422\u0443\u0442 \u043f\u043e\u043a\u0438 \u043d\u0456\u0447\u043e\u0433\u043e \u043d\u0435\u043c\u0430\u0454 \u043d\u0430 \u043f\u0440\u043e\u0434\u0430\u0436."));
             return;
         }
-        Merchant merchant = Bukkit.createMerchant((Component)LEGACY.deserialize(n.name));
+        Merchant merchant = Bukkit.createMerchant((Component)QuestNPC.colored(n.name));
         ArrayList<MerchantRecipe> recipes = new ArrayList<MerchantRecipe>();
         for (Trade t : n.trades) {
             MerchantRecipe r = new MerchantRecipe(t.result.clone(), 0, 1000000, false);
@@ -798,6 +811,15 @@ TabExecutor {
             p.giveExp(q.xp);
         }
         for (String entry : q.items) {
+            if (entry.toLowerCase(Locale.ROOT).startsWith("currency:")) {
+                String[] cp = entry.split(":");
+                String cid = cp.length > 1 ? this.parseCur(cp[1]) : null;
+                long camt = cp.length > 2 ? Math.max(1L, QuestNPC.parseLongOr(cp[2], 1L)) : 1L;
+                if (cid != null) {
+                    this.payCurrency(p, cid, camt);
+                }
+                continue;
+            }
             String[] parts = entry.split(":");
             Material m = Material.matchMaterial((String)parts[0].trim());
             if (m == null) continue;
@@ -1112,6 +1134,11 @@ TabExecutor {
     private JsonObject nodeToJson(Node node) {
         JsonObject o = new JsonObject();
         o.addProperty("text", node.text);
+        o.addProperty("uid", node.uid);
+        if (!node.again.isBlank()) {
+            o.addProperty("again", node.again);
+            o.addProperty("againCd", node.againCd);
+        }
         JsonArray arr = new JsonArray();
         for (Choice c : node.choices) {
             JsonObject co = new JsonObject();
@@ -1128,6 +1155,13 @@ TabExecutor {
 
     private Node nodeFromJson(JsonObject o, Node parent, String fromLabel, int depth) {
         Node node = new Node(o.has("text") ? o.get("text").getAsString() : "...", parent, fromLabel);
+        if (o.has("uid")) {
+            node.uid = o.get("uid").getAsString();
+        } else {
+            this.uidGenerated = true;
+        }
+        node.again = o.has("again") ? o.get("again").getAsString() : "";
+        node.againCd = o.has("againCd") ? o.get("againCd").getAsLong() : 0L;
         if (o.has("choices") && depth < 30) {
             for (JsonElement e : o.getAsJsonArray("choices")) {
                 JsonObject co = e.getAsJsonObject();
@@ -1439,6 +1473,32 @@ TabExecutor {
             }
             return true;
         }
+        if (command.getName().equalsIgnoreCase("wallet")) {
+            if (!(s instanceof Player)) {
+                s.sendMessage("Тільки для гравців.");
+                return true;
+            }
+            Player wp = (Player) s;
+            if (a.length == 0) {
+                this.openWalletMenu(wp);
+                return true;
+            }
+            String w0 = a[0].toLowerCase(Locale.ROOT);
+            if (w0.equals("balance")) {
+                wp.sendMessage(this.text(this.walletBalanceText(wp)));
+            } else if (w0.equals("deposit")) {
+                wp.sendMessage(this.text(this.walletDepositAll(wp)));
+            } else if (w0.equals("compress")) {
+                wp.sendMessage(this.text(this.walletCompress(wp)));
+            } else if (w0.equals("withdraw") && a.length >= 3 && this.parseCur(a[1]) != null) {
+                wp.sendMessage(this.text(this.walletWithdraw(wp, this.parseCur(a[1]), QuestNPC.parseLongOr(a[2], 0L))));
+            } else if (w0.equals("break") && a.length >= 3 && this.parseCur(a[1]) != null) {
+                wp.sendMessage(this.text(this.walletBreak(wp, this.parseCur(a[1]), QuestNPC.parseLongOr(a[2], 0L))));
+            } else {
+                wp.sendMessage(this.text("&7Використання: /wallet [balance | deposit | compress | withdraw <seed|petal|amber> <к-сть> | break <amber|petal> <к-сть>]"));
+            }
+            return true;
+        }
         if (!s.hasPermission("questnpc.admin")) {
             s.sendMessage("\u00a7c\u041d\u0435\u043c\u0430\u0454 \u043f\u0440\u0430\u0432.");
             return true;
@@ -1496,9 +1556,75 @@ TabExecutor {
             case "quests": {
                 s.sendMessage("\u00a7a\u041a\u0432\u0435\u0441\u0442\u0456\u0432: \u00a7f" + this.quests.size());
                 for (Quest q : this.quests.values()) {
-                    s.sendMessage("\u00a77" + q.id + " \u00a7f" + q.name + " \u00a78(\u0435\u0442\u0430\u043f\u0456\u0432: " + q.stages.size() + (q.turnIn ? ", \u0437\u0456 \u0437\u0434\u0430\u0447\u0435\u044e" : "") + ")");
+                    s.sendMessage(Component.text(q.id).color(net.kyori.adventure.text.format.NamedTextColor.GRAY)
+                        .clickEvent(net.kyori.adventure.text.event.ClickEvent.copyToClipboard(q.id))
+                        .hoverEvent(net.kyori.adventure.text.event.HoverEvent.showText(Component.text("Натисни, щоб скопіювати id")))
+                        .append(Component.text(" " + q.name + " (етапів: " + q.stages.size() + (q.turnIn ? ", зі здачею" : "") + ")", net.kyori.adventure.text.format.NamedTextColor.WHITE)));
                 }
                 break;
+            }
+            case "currency": {
+                String csub = a.length > 1 ? a[1].toLowerCase(Locale.ROOT) : "";
+                Player ct = a.length > 2 ? Bukkit.getPlayerExact(a[2]) : (s instanceof Player cpp ? cpp : null);
+                if (csub.equals("wallet")) {
+                    if (ct == null) {
+                        s.sendMessage("Гравця не знайдено. Використання: /mizkoprav currency wallet [нік]");
+                        return true;
+                    }
+                    ct.getInventory().addItem(new ItemStack[]{this.makeWallet()}).values().forEach(rest -> ct.getWorld().dropItemNaturally(ct.getLocation(), rest));
+                    s.sendMessage(this.text("&aГаманець видано: &f" + ct.getName()));
+                } else if ((csub.equals("give") || csub.equals("add")) && a.length >= 4 && this.parseCur(a[3]) != null) {
+                    Player gt = Bukkit.getPlayerExact(a[2]);
+                    if (gt == null) {
+                        s.sendMessage("Гравця не знайдено.");
+                        return true;
+                    }
+                    String gid = this.parseCur(a[3]);
+                    long gn = Math.max(1L, a.length > 4 ? QuestNPC.parseLongOr(a[4], 1L) : 1L);
+                    if (csub.equals("give")) {
+                        this.giveCurrencyItems(gt, gid, gn);
+                        s.sendMessage(this.text("&aВидано предметами: &f" + gn + " x " + this.curName(gid) + " &7-> " + gt.getName()));
+                    } else if (this.walletAdd(gt, gid, gn)) {
+                        s.sendMessage(this.text("&aДодано в гаманець: &f" + gn + " x " + this.curName(gid) + " &7-> " + gt.getName()));
+                    } else {
+                        s.sendMessage(this.text("&cУ гравця немає гаманця. Спершу: /mizkoprav currency wallet " + gt.getName()));
+                    }
+                } else if (csub.equals("balance") && ct != null) {
+                    s.sendMessage(this.text(this.walletBalanceText(ct)));
+                } else {
+                    s.sendMessage(this.text("&7Використання: /mizkoprav currency wallet [нік] | give <нік> <seed|petal|amber> [к-сть] | add <нік> <тип> [к-сть] | balance [нік]"));
+                }
+                return true;
+            }
+            case "resetphrases": {
+                Player rp = a.length > 1 ? Bukkit.getPlayerExact(a[1]) : (s instanceof Player rpp ? rpp : null);
+                if (rp == null) {
+                    s.sendMessage("Гравця не знайдено. Використання: /mizkoprav resetphrases [нік]");
+                    return true;
+                }
+                this.choiceUses.remove(rp.getUniqueId());
+                this.progressDirty = true;
+                s.sendMessage(this.text("&aОдноразові фрази та повторні репліки скинуто для &f" + rp.getName()));
+                return true;
+            }
+            case "markers": {
+                if (!(s instanceof Player)) {
+                    s.sendMessage("Тільки для гравців.");
+                    return true;
+                }
+                Player dp = (Player) s;
+                s.sendMessage(this.text("&7Знаки над NPC: markers.enabled = &f" + this.getConfig().getBoolean("markers.enabled", true)
+                    + "&7, радіус &f" + this.getConfig().getDouble("markers.range", 32.0)));
+                for (Npc dn : this.npcs.values()) {
+                    List<String> ids = new ArrayList<>();
+                    for (Quest dq : this.npcQuests(dp, dn)) {
+                        QState dst = this.stateOf(dp, dq.id);
+                        ids.add(dq.id + "(" + (dst == null ? (this.canStart(dp, dq) ? "новий" : "закритий") : dst.status) + ")");
+                    }
+                    s.sendMessage(this.text("&7NPC #" + dn.id + " &f" + dn.name + "&7: знак &f" + this.markerState(dp, dn)
+                        + "&7 (0 немає, 1 !, 2 золоте ?, 3 сіре ?), квести: &f" + (ids.isEmpty() ? "немає" : String.join(", ", ids))));
+                }
+                return true;
             }
             case "version": {
                 s.sendMessage("QuestNPC " + this.getPluginMeta().getVersion());
@@ -1671,6 +1797,7 @@ TabExecutor {
         List<ActionButton> buttons = new ArrayList<>();
         buttons.add(this.btn("&a+ Новий квест", v -> this.sync(() -> this.openQuestNew(p))));
         buttons.add(this.btn("&bЛінійки квестів", v -> this.sync(() -> this.openLineAdmin(p))));
+        buttons.add(this.btn("&7Скопіювати id квесту...", v -> this.sync(() -> this.openQuestIds(p, () -> this.openQuestList(p)))));
         for (Quest q : this.quests.values()) {
             buttons.add(this.btn(q.name + " &8(" + q.id + ")", v -> this.sync(() -> this.openQuestEditor(p, q))));
         }
@@ -1777,6 +1904,15 @@ TabExecutor {
         q.timeLimit = QuestNPC.parseDuration(v.apply("timelimit"));
         List<String> items = new ArrayList<>();
         for (String entry : QuestNPC.lines(v.apply("items"))) {
+            if (entry.toLowerCase(Locale.ROOT).startsWith("currency:")) {
+                String[] cp = entry.split(":");
+                if (cp.length < 2 || this.parseCur(cp[1]) == null) {
+                    p.sendMessage(this.text("&cНевідома валюта (seed, petal або amber): &f" + entry));
+                } else {
+                    items.add(entry);
+                }
+                continue;
+            }
             if (Material.matchMaterial(entry.split(":")[0].trim()) == null) {
                 this.suggestItems(p, entry.split(":")[0]);
                 continue;
@@ -1799,7 +1935,7 @@ TabExecutor {
         inputs.add(this.line("cooldown", "Кулдаун повтору (напр. 30m, 12h, 1d; 0 = без; працює для повторюваних)", q.cooldown > 0L ? q.cooldown + "s" : "0", 12));
         inputs.add(this.line("dailyreset", "Щоденне оновлення о (ГГ:ХХ, напр. 04:00; порожньо = немає)", q.dailyReset >= 0 ? QuestNPC.hhmm(q.dailyReset) : "", 5));
         inputs.add(this.line("timelimit", "Ліміт часу на виконання (напр. 30m, 2h; 0 = без)", q.timeLimit > 0L ? q.timeLimit + "s" : "0", 12));
-        inputs.add(this.block("items", "Нагорода: предмети (МАТЕРІАЛ:кількість, кожен з нового рядка)",
+        inputs.add(this.block("items", "Нагорода: предмети (МАТЕРІАЛ:кількість; валюта: currency:seed|petal|amber:кількість; кожен з нового рядка)",
             String.join("\n", q.items), 500));
         inputs.add(this.block("commands", "Нагорода: команди від консолі ({player} = нік, по одній в рядок)",
             String.join("\n", q.commands), 500));
@@ -1835,6 +1971,9 @@ TabExecutor {
                 this.openQuestEditor(p, q);
             })));
         }
+        buttons.add(this.copyBtn("&7Скопіювати id: &f" + q.id, q.id));
+        buttons.add(this.copyBtn("&7Скопіювати дію «взяти»: &fquest:" + q.id, "quest:" + q.id));
+        buttons.add(this.copyBtn("&7Скопіювати дію «здати»: &fturnin:" + q.id, "turnin:" + q.id));
         buttons.add(this.btn("&bВимоги, видавець, відповіді NPC", v -> this.sync(() -> {
             this.applyQuestFields(p, q, v);
             this.saveQuests();
@@ -2363,7 +2502,7 @@ TabExecutor {
             rewards.add(q.xp + " досвіду");
         }
         for (String it : q.items) {
-            rewards.add(it.replace(":", " x"));
+            rewards.add(this.rewardLabel(it));
         }
         for (String enc : q.stacks) {
             try {
@@ -2898,7 +3037,7 @@ TabExecutor {
             rewards.add(q.xp + " досвіду");
         }
         for (String it : q.items) {
-            rewards.add(it.replace(":", " x"));
+            rewards.add(this.rewardLabel(it));
         }
         for (String enc : q.stacks) {
             try {
@@ -3152,6 +3291,11 @@ TabExecutor {
         inputs.add(this.block("acceptreply", "Відповідь NPC, коли гравець приймає квест (порожньо = без відповіді)", q.acceptReply, 400));
         inputs.add(this.block("declinereply", "Відповідь NPC, коли гравець відхиляє квест (порожньо = без відповіді)", q.declineReply, 400));
         List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(this.btn("&7Скопіювати id квестів...", v -> this.sync(() -> {
+            this.applyReq(p, q, v);
+            this.saveQuests();
+            this.openQuestIds(p, () -> this.openReqEditor(p, q));
+        })));
         buttons.add(this.btn("&aЗберегти", v -> this.sync(() -> {
             this.applyReq(p, q, v);
             this.saveQuests();
@@ -3440,22 +3584,18 @@ TabExecutor {
     /** 0 = немає знака, 1 = «!» (є новий квест), 2 = золоте «?» (є що здати), 3 = сіре «?» (квест веде до цього NPC). */
     private int markerState(Player p, Npc n) {
         Map<String, QState> m = this.progress.get(p.getUniqueId());
-        java.util.Set<String> turn = new java.util.LinkedHashSet<>();
+        List<Quest> listed = this.npcQuests(p, n);
+        for (Quest q : listed) {
+            QState st = m == null ? null : m.get(q.id);
+            if (st != null && "READY".equals(st.status)) {
+                return 2;
+            }
+        }
         java.util.Set<String> offer = new java.util.LinkedHashSet<>();
-        this.collectByPrefix(n.root, "turnin:", turn);
         this.collectByPrefix(n.root, "quest:", offer);
         for (Quest gq : this.quests.values()) {
             if (gq.giver == n.id) {
                 offer.add(gq.id);
-                turn.add(gq.id);
-            }
-        }
-        if (m != null) {
-            for (String id : turn) {
-                QState st = m.get(id);
-                if (st != null && "READY".equals(st.status)) {
-                    return 2;
-                }
             }
         }
         for (String id : offer) {
@@ -3464,16 +3604,10 @@ TabExecutor {
                 return 1;
             }
         }
-        if (m != null) {
-            for (Map.Entry<String, QState> en : m.entrySet()) {
-                Quest q = this.quests.get(en.getKey());
-                QState st = en.getValue();
-                if (q == null || !"ACTIVE".equals(st.status) || st.stage >= q.stages.size()) {
-                    continue;
-                }
-                if (q.stages.get(st.stage).npc == n.id) {
-                    return 3;
-                }
+        for (Quest q : listed) {
+            QState st = m == null ? null : m.get(q.id);
+            if (st != null && "ACTIVE".equals(st.status) && st.stage < q.stages.size() && q.stages.get(st.stage).npc == n.id) {
+                return 3;
             }
         }
         return 0;
@@ -3554,6 +3688,510 @@ TabExecutor {
         }
     }
 
+    /** Репліка NPC: перший раз основний текст, потім (або після кулдауну) повторна репліка. */
+    private String nodeText(Player p, Node node) {
+        if (node.again.isBlank()) {
+            return node.text;
+        }
+        long now = System.currentTimeMillis();
+        Map<String, Long> uses = this.choiceUses.computeIfAbsent(p.getUniqueId(), k -> new HashMap<>());
+        String key = "n" + node.uid;
+        Long last = uses.get(key);
+        if (last != null && (node.againCd <= 0L || now - last < node.againCd * 1000L)) {
+            return node.again;
+        }
+        uses.put(key, now);
+        this.progressDirty = true;
+        return node.text;
+    }
+
+    // ======================= v0.8.0: ВАЛЮТА І ГАМАНЕЦЬ (ВАНІЛЬНИЙ МІШЕЧОК) =======================
+
+    private NamespacedKey nk(String k) {
+        return new NamespacedKey((Plugin) this, k);
+    }
+
+    /** Розпізнає валюту за коротким або повним id; null, якщо такої немає. */
+    private String parseCur(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        return switch (raw.trim().toLowerCase(Locale.ROOT)) {
+            case "seed", "copper_seed", "copper", "насіння", "мідне" -> "copper_seed";
+            case "petal", "iron_petal", "iron", "пелюстка", "залізна" -> "iron_petal";
+            case "amber", "polished_amber", "бурштин" -> "polished_amber";
+            default -> null;
+        };
+    }
+
+    private String curName(String id) {
+        return switch (id) {
+            case "copper_seed" -> "Мідне насіння";
+            case "iron_petal" -> "Залізна пелюстка";
+            default -> "Відполірований бурштин";
+        };
+    }
+
+    private String curColor(String id) {
+        return switch (id) {
+            case "copper_seed" -> "&6";
+            case "iron_petal" -> "&7";
+            default -> "&e";
+        };
+    }
+
+    private Material curBase(String id) {
+        return switch (id) {
+            case "copper_seed" -> Material.WHEAT_SEEDS;
+            case "iron_petal" -> Material.IRON_NUGGET;
+            default -> Material.GOLD_NUGGET;
+        };
+    }
+
+    private long petalInSeeds() {
+        return Math.max(1L, this.getConfig().getLong("currency.petal-in-seeds", 64L));
+    }
+
+    private long amberInPetals() {
+        return Math.max(1L, this.getConfig().getLong("currency.amber-in-petals", 32L));
+    }
+
+    /** Вартість одного предмета в мідних насінинах. */
+    private long curValue(String id) {
+        return switch (id) {
+            case "copper_seed" -> 1L;
+            case "iron_petal" -> this.petalInSeeds();
+            default -> this.petalInSeeds() * this.amberInPetals();
+        };
+    }
+
+    private static long parseLongOr(String raw, long def) {
+        try {
+            return Long.parseLong(raw == null ? "" : raw.trim());
+        } catch (NumberFormatException ex) {
+            return def;
+        }
+    }
+
+    private ItemStack makeCurrency(String id, int amount) {
+        ItemStack it = new ItemStack(this.curBase(id), Math.max(1, Math.min(amount, 64)));
+        ItemMeta meta = it.getItemMeta();
+        meta.setItemModel(this.nk(id));
+        meta.itemName(LEGACY.deserialize(this.curColor(id) + this.curName(id)));
+        meta.getPersistentDataContainer().set(this.nk("currency"), PersistentDataType.STRING, id);
+        it.setItemMeta(meta);
+        return it;
+    }
+
+    private String currencyOf(ItemStack it) {
+        if (it == null || !it.hasItemMeta()) {
+            return null;
+        }
+        return it.getItemMeta().getPersistentDataContainer().get(this.nk("currency"), PersistentDataType.STRING);
+    }
+
+    private boolean isWallet(ItemStack it) {
+        return it != null && it.getType() == Material.BUNDLE && it.hasItemMeta()
+            && it.getItemMeta().getPersistentDataContainer().has(this.nk("wallet"), PersistentDataType.BYTE);
+    }
+
+    private long balOf(ItemMeta meta, String id) {
+        return meta.getPersistentDataContainer().getOrDefault(this.nk("bal_" + id), PersistentDataType.LONG, 0L);
+    }
+
+    private void setBal(ItemMeta meta, String id, long v) {
+        meta.getPersistentDataContainer().set(this.nk("bal_" + id), PersistentDataType.LONG, Math.max(0L, v));
+    }
+
+    private long totalSeeds(ItemMeta meta) {
+        long t = 0L;
+        for (String id : CUR_IDS) {
+            t += this.balOf(meta, id) * this.curValue(id);
+        }
+        return t;
+    }
+
+    private static final String[] CUR_IDS = {"polished_amber", "iron_petal", "copper_seed"};
+
+    private void refreshWalletLore(ItemMeta meta) {
+        List<Component> lore = new ArrayList<>();
+        net.kyori.adventure.text.format.TextDecoration it = net.kyori.adventure.text.format.TextDecoration.ITALIC;
+        for (String id : CUR_IDS) {
+            lore.add(LEGACY.deserialize("&7" + this.curName(id) + ": &f" + this.balOf(meta, id)).decoration(it, false));
+        }
+        lore.add(LEGACY.deserialize("&8Усього в насінні: " + this.totalSeeds(meta)).decoration(it, false));
+        lore.add(Component.empty());
+        lore.add(LEGACY.deserialize("&7Перетягни валюту на гаманець, щоб покласти.").decoration(it, false));
+        lore.add(LEGACY.deserialize("&7ПКМ по гаманцю - меню.").decoration(it, false));
+        meta.lore(lore);
+    }
+
+    private ItemStack makeWallet() {
+        ItemStack it = new ItemStack(Material.BUNDLE);
+        ItemMeta meta = it.getItemMeta();
+        meta.itemName(LEGACY.deserialize("&6Гаманець"));
+        meta.getPersistentDataContainer().set(this.nk("wallet"), PersistentDataType.BYTE, (byte) 1);
+        this.refreshWalletLore(meta);
+        it.setItemMeta(meta);
+        return it;
+    }
+
+    private int walletSlot(Player p) {
+        org.bukkit.inventory.PlayerInventory inv = p.getInventory();
+        for (int i = 0; i <= 40; i++) {
+            if (this.isWallet(inv.getItem(i))) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Змінює баланс першого гаманця в інвентарі гравця. false = гаманця немає. */
+    private boolean editWallet(Player p, java.util.function.Consumer<ItemMeta> change) {
+        int slot = this.walletSlot(p);
+        if (slot < 0) {
+            return false;
+        }
+        ItemStack w = p.getInventory().getItem(slot);
+        ItemMeta meta = w.getItemMeta();
+        change.accept(meta);
+        this.refreshWalletLore(meta);
+        w.setItemMeta(meta);
+        p.getInventory().setItem(slot, w);
+        return true;
+    }
+
+    private boolean walletAdd(Player p, String id, long n) {
+        return this.editWallet(p, m -> this.setBal(m, id, this.balOf(m, id) + n));
+    }
+
+    private void giveCurrencyItems(Player p, String id, long n) {
+        long left = Math.min(n, 9216L);
+        while (left > 0L) {
+            int c = (int) Math.min(64L, left);
+            p.getInventory().addItem(new ItemStack[]{this.makeCurrency(id, c)}).values()
+                .forEach(rest -> p.getWorld().dropItemNaturally(p.getLocation(), rest));
+            left -= (long) c;
+        }
+    }
+
+    /** Нарахування валюти: у гаманець, якщо він є, інакше предметами. */
+    private void payCurrency(Player p, String id, long n) {
+        if (this.walletAdd(p, id, n)) {
+            p.sendMessage(this.text("&6+" + n + " &f" + this.curName(id) + " &7(в гаманець)"));
+        } else {
+            this.giveCurrencyItems(p, id, n);
+            p.sendMessage(this.text("&6+" + n + " &f" + this.curName(id)));
+        }
+    }
+
+    private String rewardLabel(String it) {
+        if (it.toLowerCase(Locale.ROOT).startsWith("currency:")) {
+            String[] cp = it.split(":");
+            String cid = cp.length > 1 ? this.parseCur(cp[1]) : null;
+            if (cid != null) {
+                return (cp.length > 2 ? cp[2].trim() : "1") + " x " + this.curName(cid);
+            }
+        }
+        return it.replace(":", " x");
+    }
+
+    private String walletBalanceText(Player p) {
+        int slot = this.walletSlot(p);
+        if (slot < 0) {
+            return "&cУ тебе немає гаманця. Його видає адміністратор.";
+        }
+        ItemMeta meta = p.getInventory().getItem(slot).getItemMeta();
+        StringBuilder sb = new StringBuilder("&6Баланс гаманця:");
+        for (String id : CUR_IDS) {
+            sb.append("\n&7").append(this.curName(id)).append(": &f").append(this.balOf(meta, id));
+        }
+        sb.append("\n&8Усього в насінні: ").append(this.totalSeeds(meta));
+        sb.append("\n&8Курс: 1 пелюстка = ").append(this.petalInSeeds()).append(" насінин, 1 бурштин = ").append(this.amberInPetals()).append(" пелюсток");
+        return sb.toString();
+    }
+
+    private String walletWithdraw(Player p, String id, long n) {
+        if (n <= 0L) {
+            return "&cВкажи додатну кількість.";
+        }
+        if (n > 2304L) {
+            return "&cЗа раз можна зняти не більше 2304.";
+        }
+        int slot = this.walletSlot(p);
+        if (slot < 0) {
+            return "&cУ тебе немає гаманця.";
+        }
+        long have = this.balOf(p.getInventory().getItem(slot).getItemMeta(), id);
+        if (have < n) {
+            return "&cНедостатньо: у гаманці лише " + have + " (" + this.curName(id) + ").";
+        }
+        this.editWallet(p, m -> this.setBal(m, id, this.balOf(m, id) - n));
+        this.giveCurrencyItems(p, id, n);
+        return "&aЗнято: &f" + n + " x " + this.curName(id);
+    }
+
+    private String walletDepositAll(Player p) {
+        if (this.walletSlot(p) < 0) {
+            return "&cУ тебе немає гаманця.";
+        }
+        Map<String, Long> got = new LinkedHashMap<>();
+        org.bukkit.inventory.PlayerInventory inv = p.getInventory();
+        for (int i = 0; i <= 40; i++) {
+            ItemStack it = inv.getItem(i);
+            String cid = this.currencyOf(it);
+            if (cid == null) {
+                continue;
+            }
+            got.merge(cid, (long) it.getAmount(), Long::sum);
+            inv.setItem(i, null);
+        }
+        if (got.isEmpty()) {
+            return "&7В інвентарі немає валюти.";
+        }
+        this.editWallet(p, m -> {
+            for (Map.Entry<String, Long> en : got.entrySet()) {
+                this.setBal(m, en.getKey(), this.balOf(m, en.getKey()) + en.getValue());
+            }
+        });
+        StringBuilder sb = new StringBuilder("&aПокладено в гаманець:");
+        for (Map.Entry<String, Long> en : got.entrySet()) {
+            sb.append(" &f").append(en.getValue()).append(" x ").append(this.curName(en.getKey())).append("&7;");
+        }
+        return sb.toString();
+    }
+
+    private String walletCompress(Player p) {
+        long pis = this.petalInSeeds();
+        long aip = this.amberInPetals();
+        boolean ok = this.editWallet(p, m -> {
+            long s = this.balOf(m, "copper_seed");
+            long mkP = s / pis;
+            this.setBal(m, "copper_seed", s - mkP * pis);
+            this.setBal(m, "iron_petal", this.balOf(m, "iron_petal") + mkP);
+            long pe = this.balOf(m, "iron_petal");
+            long mkA = pe / aip;
+            this.setBal(m, "iron_petal", pe - mkA * aip);
+            this.setBal(m, "polished_amber", this.balOf(m, "polished_amber") + mkA);
+        });
+        return ok ? "&aДрібну валюту об'єднано у більшу." : "&cУ тебе немає гаманця.";
+    }
+
+    /** Розмін: бурштин на пелюстки (amber) або пелюстки на насіння (petal). */
+    private String walletBreak(Player p, String id, long n) {
+        if (n <= 0L) {
+            return "&cВкажи додатну кількість.";
+        }
+        if (!id.equals("polished_amber") && !id.equals("iron_petal")) {
+            return "&cРозміняти можна лише бурштин або пелюстки.";
+        }
+        int slot = this.walletSlot(p);
+        if (slot < 0) {
+            return "&cУ тебе немає гаманця.";
+        }
+        long have = this.balOf(p.getInventory().getItem(slot).getItemMeta(), id);
+        if (have < n) {
+            return "&cНедостатньо: у гаманці лише " + have + " (" + this.curName(id) + ").";
+        }
+        String to = id.equals("polished_amber") ? "iron_petal" : "copper_seed";
+        long mult = id.equals("polished_amber") ? this.amberInPetals() : this.petalInSeeds();
+        this.editWallet(p, m -> {
+            this.setBal(m, id, this.balOf(m, id) - n);
+            this.setBal(m, to, this.balOf(m, to) + n * mult);
+        });
+        return "&aРозміняно: &f" + n + " x " + this.curName(id) + " &7-> &f" + (n * mult) + " x " + this.curName(to);
+    }
+
+    private void openWalletMenu(Player p) {
+        if (this.walletSlot(p) < 0) {
+            p.sendMessage(this.text("&cУ тебе немає гаманця. Його видає адміністратор."));
+            return;
+        }
+        List<DialogInput> inputs = new ArrayList<>();
+        inputs.add(this.line("wamber", "Зняти: бурштин", "0", 6));
+        inputs.add(this.line("wpetal", "Зняти: пелюстки", "0", 6));
+        inputs.add(this.line("wseed", "Зняти: насіння", "0", 6));
+        inputs.add(this.line("xn", "Кількість для розміну", "1", 6));
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(this.btn("&aЗняти вказане", v -> this.sync(() -> {
+            String[] ids = {"polished_amber", "iron_petal", "copper_seed"};
+            String[] keys = {"wamber", "wpetal", "wseed"};
+            for (int i = 0; i < 3; i++) {
+                long n = QuestNPC.parseLongOr(v.apply(keys[i]), 0L);
+                if (n > 0L) {
+                    p.sendMessage(this.text(this.walletWithdraw(p, ids[i], n)));
+                }
+            }
+            this.openWalletMenu(p);
+        })));
+        buttons.add(this.btn("Покласти все з інвентаря", v -> this.sync(() -> {
+            p.sendMessage(this.text(this.walletDepositAll(p)));
+            this.openWalletMenu(p);
+        })));
+        buttons.add(this.btn("Об'єднати дрібне у велике", v -> this.sync(() -> {
+            p.sendMessage(this.text(this.walletCompress(p)));
+            this.openWalletMenu(p);
+        })));
+        buttons.add(this.btn("Розміняти бурштин на пелюстки", v -> this.sync(() -> {
+            p.sendMessage(this.text(this.walletBreak(p, "polished_amber", QuestNPC.parseLongOr(v.apply("xn"), 1L))));
+            this.openWalletMenu(p);
+        })));
+        buttons.add(this.btn("Розміняти пелюстки на насіння", v -> this.sync(() -> {
+            p.sendMessage(this.text(this.walletBreak(p, "iron_petal", QuestNPC.parseLongOr(v.apply("xn"), 1L))));
+            this.openWalletMenu(p);
+        })));
+        p.showDialog((DialogLike) this.dialog("&6Гаманець",
+            List.of(DialogBody.plainMessage((Component) this.fmt(this.walletBalanceText(p), p))),
+            inputs,
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Закрити", null), (int) 1)));
+    }
+
+    // ---- події: гаманець і захист валюти ----
+
+    @EventHandler
+    public void onCoinInteract(org.bukkit.event.player.PlayerInteractEvent e) {
+        ItemStack hand = e.getItem();
+        if (hand == null) {
+            return;
+        }
+        if (this.isWallet(hand)) {
+            if (e.getAction() == Action.RIGHT_CLICK_AIR || e.getAction() == Action.RIGHT_CLICK_BLOCK) {
+                e.setCancelled(true);
+                this.openWalletMenu(e.getPlayer());
+            }
+            return;
+        }
+        if (this.currencyOf(hand) != null) {
+            e.setUseItemInHand(org.bukkit.event.Event.Result.DENY);
+        }
+    }
+
+    @EventHandler
+    public void onCoinInteractEntity(org.bukkit.event.player.PlayerInteractEntityEvent e) {
+        if (e.getRightClicked() instanceof Mannequin) {
+            return;
+        }
+        ItemStack hand = e.getPlayer().getInventory().getItem(e.getHand());
+        if (this.currencyOf(hand) != null) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onCoinCraft(org.bukkit.event.inventory.PrepareItemCraftEvent e) {
+        for (ItemStack it : e.getInventory().getMatrix()) {
+            if (it != null && (this.currencyOf(it) != null || this.isWallet(it))) {
+                e.getInventory().setResult(null);
+                return;
+            }
+        }
+    }
+
+    @EventHandler
+    public void onWalletClick(org.bukkit.event.inventory.InventoryClickEvent e) {
+        if (!(e.getWhoClicked() instanceof Player p)) {
+            return;
+        }
+        org.bukkit.event.inventory.ClickType click = e.getClick();
+        if (click != org.bukkit.event.inventory.ClickType.LEFT && click != org.bukkit.event.inventory.ClickType.RIGHT) {
+            return;
+        }
+        ItemStack cur = e.getCurrentItem();
+        ItemStack cursor = e.getCursor();
+        boolean cursorEmpty = cursor == null || cursor.getType().isAir();
+        // валюта на курсорі кладеться в гаманець у слоті
+        if (cur != null && this.isWallet(cur) && !cursorEmpty) {
+            e.setCancelled(true);
+            String cid = this.currencyOf(cursor);
+            if (cid == null) {
+                return;
+            }
+            int n = click == org.bukkit.event.inventory.ClickType.RIGHT ? 1 : cursor.getAmount();
+            ItemMeta meta = cur.getItemMeta();
+            this.setBal(meta, cid, this.balOf(meta, cid) + (long) n);
+            this.refreshWalletLore(meta);
+            cur.setItemMeta(meta);
+            e.setCurrentItem(cur);
+            ItemStack rest = cursor.clone();
+            rest.setAmount(cursor.getAmount() - n);
+            e.setCursor(rest.getAmount() <= 0 ? null : rest);
+            p.playSound(p.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.6f, 1.2f);
+            return;
+        }
+        // гаманець на курсорі: клік по слоту з валютою кладе її в гаманець
+        if (cursor != null && this.isWallet(cursor) && cur != null && !cur.getType().isAir()) {
+            e.setCancelled(true);
+            String cid = this.currencyOf(cur);
+            if (cid == null) {
+                return;
+            }
+            int n = click == org.bukkit.event.inventory.ClickType.RIGHT ? 1 : cur.getAmount();
+            ItemMeta meta = cursor.getItemMeta();
+            this.setBal(meta, cid, this.balOf(meta, cid) + (long) n);
+            this.refreshWalletLore(meta);
+            cursor.setItemMeta(meta);
+            e.setCursor(cursor);
+            ItemStack rest = cur.clone();
+            rest.setAmount(cur.getAmount() - n);
+            e.setCurrentItem(rest.getAmount() <= 0 ? null : rest);
+            p.playSound(p.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.6f, 1.2f);
+            return;
+        }
+        // ПКМ по гаманцю з порожнім курсором відкриває меню
+        if (cur != null && this.isWallet(cur) && cursorEmpty && click == org.bukkit.event.inventory.ClickType.RIGHT) {
+            e.setCancelled(true);
+            Bukkit.getScheduler().runTask((Plugin) this, () -> this.openWalletMenu(p));
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onCoinPickup(org.bukkit.event.entity.EntityPickupItemEvent e) {
+        if (!(e.getEntity() instanceof Player p) || !this.getConfig().getBoolean("currency.auto-deposit", true)) {
+            return;
+        }
+        String cid = this.currencyOf(e.getItem().getItemStack());
+        if (cid == null || this.walletSlot(p) < 0) {
+            return;
+        }
+        long n = e.getItem().getItemStack().getAmount();
+        e.setCancelled(true);
+        e.getItem().remove();
+        this.walletAdd(p, cid, n);
+        p.playSound(p.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.4f, 1.4f);
+        p.sendActionBar(LEGACY.deserialize("&6+" + n + " &f" + this.curName(cid)));
+    }
+
+    // ======================= v0.6.5: КОПІЮВАННЯ ID КВЕСТІВ =======================
+
+    /** Кнопка, яка копіює текст у буфер обміну гравця. */
+    private ActionButton copyBtn(String label, String value) {
+        return ActionButton.create((Component) LEGACY.deserialize(label),
+            (Component) LEGACY.deserialize("&7Натисни, щоб скопіювати: &f" + value), (int) 300,
+            (DialogAction) DialogAction.staticAction(net.kyori.adventure.text.event.ClickEvent.copyToClipboard(value)));
+    }
+
+    /** Вікно, яке не закривається після натискання кнопки (щоб скопіювати кілька id підряд). */
+    private Dialog dialogKeep(String title, List<DialogBody> body, List<DialogInput> inputs, DialogType type) {
+        return Dialog.create(factory -> ((DialogRegistryEntry.Builder) factory.empty()).base(DialogBase.builder((Component) QuestNPC.colored(title)).canCloseWithEscape(true).afterAction(DialogBase.DialogAfterAction.NONE).body(body).inputs(inputs).build()).type(type));
+    }
+
+    /** Список усіх квестів: клік по рядку копіює id квесту. */
+    private void openQuestIds(Player p, Runnable back) {
+        List<ActionButton> buttons = new ArrayList<>();
+        for (Quest q : this.quests.values()) {
+            buttons.add(this.copyBtn("&f" + q.name + " &8(" + q.id + ")", q.id));
+        }
+        if (buttons.isEmpty()) {
+            p.sendMessage(this.text("&cКвестів ще немає."));
+            back.run();
+            return;
+        }
+        p.showDialog((DialogLike) this.dialogKeep("&bСкопіювати id квесту",
+            List.of(this.para("Натисни на квест, щоб скопіювати його id в буфер обміну. Потім встав його (Ctrl+V) у потрібне поле.")),
+            List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(back)), (int) 1)));
+    }
+
     private Npc byArg(String[] a) {
         if (a.length < 2) {
             return null;
@@ -3571,7 +4209,7 @@ TabExecutor {
             return List.of();
         }
         if (a.length == 1) {
-            return List.of("give", "list", "remove", "tp", "here", "quests", "editor", "version", "reload").stream().filter(x -> x.startsWith(a[0].toLowerCase())).toList();
+            return List.of("give", "list", "remove", "tp", "here", "quests", "editor", "version", "markers", "resetphrases", "currency", "reload").stream().filter(x -> x.startsWith(a[0].toLowerCase())).toList();
         }
         if (a.length == 2 && (a[0].equalsIgnoreCase("remove") || a[0].equalsIgnoreCase("tp"))) {
             return this.npcs.keySet().stream().map(String::valueOf).filter(x -> x.startsWith(a[1])).toList();
@@ -3603,6 +4241,9 @@ TabExecutor {
         final List<Choice> choices = new ArrayList<Choice>();
         final Node parent;
         String fromLabel;
+        String uid = UUID.randomUUID().toString().substring(0, 8);
+        String again = "";
+        long againCd = 0L;
 
         Node(String text, Node parent, String fromLabel) {
             this.text = text;
