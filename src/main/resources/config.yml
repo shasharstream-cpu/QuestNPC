@@ -48,3 +48,12 @@ markers:
 # Порожньо = часовий пояс сервера. Приклад: Europe/Kyiv
 daily:
   timezone: ""
+
+# Поза NPC «сидить»: на скільки блоків нижче за NPC ставиться невидиме сидіння.
+# Якщо NPC висить у повітрі чи провалюється, підлаштуй число і виконай /mizkoprav reload.
+pose:
+  sit-offset: -0.5
+
+# Розмови між NPC (/mizkoprav chatter)
+chatter:
+  chat-messages: false   # true = фрази розмови ще й дублюються в чат гравцям поруч
