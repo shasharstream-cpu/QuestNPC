@@ -200,6 +200,7 @@ TabExecutor {
             this.save();
         }
         this.loadQuests();
+        this.loadChatters();
         this.loadProgress();
         this.getServer().getPluginManager().registerEvents((Listener)this, (Plugin)this);
         PluginCommand cmd = this.getCommand("mizkoprav");
@@ -212,6 +213,8 @@ TabExecutor {
         }
         this.getServer().getScheduler().runTaskTimer((Plugin)this, this::checkReach, 40L, 20L);
         this.getServer().getScheduler().runTaskTimer((Plugin)this, this::updateTrackers, 40L, 20L);
+        this.getServer().getScheduler().runTaskTimer((Plugin)this, this::tickChatters, 200L, 20L);
+        this.getServer().getScheduler().runTaskTimer((Plugin)this, this::maintainPoses, 100L, 100L);
         this.getServer().getScheduler().runTaskTimer((Plugin)this, () -> {
             if (this.progressDirty) {
                 this.saveProgress();
@@ -220,6 +223,11 @@ TabExecutor {
     }
 
     public void onDisable() {
+        for (org.bukkit.entity.TextDisplay nb : new ArrayList<>(this.npcBubbles.values())) {
+            if (nb.isValid()) {
+                nb.remove();
+            }
+        }
         for (Player pl : Bukkit.getOnlinePlayers()) {
             this.hideTracker(pl);
             this.removeMarkers(pl);
@@ -326,41 +334,49 @@ TabExecutor {
     }
 
     private Integer npcIdOf(Entity entity) {
-        if (!(entity instanceof Mannequin)) {
+        if (!(entity instanceof org.bukkit.entity.LivingEntity)) {
             return null;
         }
         return (Integer)entity.getPersistentDataContainer().get(this.npcKey, PersistentDataType.INTEGER);
     }
 
-    private void setup(Mannequin m, Npc n) {
+    private void setup(Entity m, Npc n) {
         m.getPersistentDataContainer().set(this.npcKey, PersistentDataType.INTEGER, n.id);
         m.customName((Component)QuestNPC.colored(n.name));
         m.setCustomNameVisible(true);
-        m.setDescription(null);
-        m.setImmovable(true);
         m.setInvulnerable(true);
         m.setSilent(true);
         m.setPersistent(true);
-        m.setRemoveWhenFarAway(false);
+        if (m instanceof Mannequin mq) {
+            mq.setDescription(null);
+            mq.setImmovable(true);
+            this.applyPose(mq, n);
+        }
+        if (m instanceof org.bukkit.entity.LivingEntity le) {
+            le.setRemoveWhenFarAway(false);
+            if (!(m instanceof Mannequin)) {
+                le.setAI(false);
+                le.setCollidable(false);
+            }
+        }
     }
 
-    private Mannequin entityOf(Npc n) {
-        Mannequin m;
+    private Entity entityOf(Npc n) {
         if (n.entity == null || n.loc == null || n.loc.getWorld() == null) {
             return null;
         }
         n.loc.getWorld().getChunkAt(n.loc).load();
-        Entity e = n.loc.getWorld().getEntity(n.entity);
-        return e instanceof Mannequin ? (m = (Mannequin)e) : null;
+        return n.loc.getWorld().getEntity(n.entity);
     }
 
-    private Npc createNpc(String name, String skin, Location loc) {
+    private Npc createNpc(String name, String skin, Location loc, String mob) {
         Npc n = new Npc(this.nextId++);
         n.name = name;
         n.skin = skin;
+        n.mobType = this.validMob(mob);
         n.loc = loc.clone();
         n.root.choices.add(new Choice("\u0425\u0442\u043e \u0442\u0438?", "", "", new Node("\u042f \u043d\u043e\u0432\u0438\u0439 NPC. \u041c\u0435\u043d\u0435 \u043c\u043e\u0436\u043d\u0430 \u043d\u0430\u043b\u0430\u0448\u0442\u0443\u0432\u0430\u0442\u0438 \u041c\u0456\u0437\u043a\u043e\u043f\u0440\u0430\u0432\u043e\u043c.", n.root, "\u0425\u0442\u043e \u0442\u0438?")));
-        Mannequin m = (Mannequin)loc.getWorld().spawn(loc, Mannequin.class, mq -> this.setup((Mannequin)mq, n));
+        Entity m = this.spawnNpcEntity(n, loc);
         n.entity = m.getUniqueId();
         this.npcs.put(n.id, n);
         this.save();
@@ -374,9 +390,9 @@ TabExecutor {
         }
         PlayerProfile profile = Bukkit.createProfile((String)n.skin);
         profile.update().thenAccept(resolved -> this.sync(() -> {
-            Mannequin m = this.entityOf(n);
-            if (m != null && resolved != null) {
-                m.setProfile(ResolvableProfile.resolvableProfile((PlayerProfile)resolved));
+            Entity m = this.entityOf(n);
+            if (m instanceof Mannequin mm && resolved != null) {
+                mm.setProfile(ResolvableProfile.resolvableProfile((PlayerProfile)resolved));
             }
         })).exceptionally(ex -> {
             this.getLogger().warning("\u041d\u0435 \u0432\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0438\u0442\u0438 \u0441\u043a\u0456\u043d '" + n.skin + "': " + ex.getMessage());
@@ -385,7 +401,8 @@ TabExecutor {
     }
 
     private void removeNpc(Npc n) {
-        Mannequin m = this.entityOf(n);
+        Entity m = this.entityOf(n);
+        this.dropSeat(n);
         if (m != null) {
             m.remove();
         }
@@ -537,17 +554,21 @@ TabExecutor {
 
     private void openCreate(Player p, Location loc) {
         ConfirmationType type = DialogType.confirmation((ActionButton)this.btn("&a\u0421\u0442\u0432\u043e\u0440\u0438\u0442\u0438", v -> this.sync(() -> {
-            Npc n = this.createNpc(QuestNPC.clean((String)v.apply("name"), "NPC"), QuestNPC.clean((String)v.apply("skin"), ""), loc);
+            Npc n = this.createNpc(QuestNPC.clean((String)v.apply("name"), "NPC"), QuestNPC.clean((String)v.apply("skin"), ""), loc, QuestNPC.clean((String)v.apply("mob"), ""));
             p.sendMessage(this.text("&aNPC #" + n.id + " \u0441\u0442\u0432\u043e\u0440\u0435\u043d\u043e. \u041f\u041a\u041c \u043f\u043e \u043d\u044c\u043e\u043c\u0443 \u0437 \u041c\u0456\u0437\u043a\u043e\u043f\u0440\u0430\u0432\u043e\u043c - \u043d\u0430\u043b\u0430\u0448\u0442\u0443\u0432\u0430\u043d\u043d\u044f."));
         })), (ActionButton)this.btn("&c\u0421\u043a\u0430\u0441\u0443\u0432\u0430\u0442\u0438", null));
-        p.showDialog((DialogLike)this.dialog("&5\u0421\u0442\u0432\u043e\u0440\u0435\u043d\u043d\u044f NPC", List.of(this.para("NPC \u0437'\u044f\u0432\u0438\u0442\u044c\u0441\u044f \u043d\u0430 \u0432\u0438\u0431\u0440\u0430\u043d\u043e\u043c\u0443 \u043c\u0456\u0441\u0446\u0456. \u0421\u043a\u0456\u043d \u0431\u0435\u0440\u0435\u0442\u044c\u0441\u044f \u0437\u0430 \u043d\u0456\u043a\u043e\u043c \u0433\u0440\u0430\u0432\u0446\u044f (\u043f\u043e\u0442\u0440\u0456\u0431\u0435\u043d \u043e\u043d\u043b\u0430\u0439\u043d-\u0440\u0435\u0436\u0438\u043c \u0441\u0435\u0440\u0432\u0435\u0440\u0430).")), List.of(this.line("name", "Ім'я NPC (&-кольори, &#RRGGBB або <gradient:#f00:#00f>...)", "\u041d\u043e\u0432\u0438\u0439 NPC", 150), this.line("skin", "\u0421\u043a\u0456\u043d: \u043d\u0456\u043a \u0433\u0440\u0430\u0432\u0446\u044f", p.getName(), 16)), (DialogType)type));
+        p.showDialog((DialogLike)this.dialog("&5\u0421\u0442\u0432\u043e\u0440\u0435\u043d\u043d\u044f NPC", List.of(this.para("NPC \u0437'\u044f\u0432\u0438\u0442\u044c\u0441\u044f \u043d\u0430 \u0432\u0438\u0431\u0440\u0430\u043d\u043e\u043c\u0443 \u043c\u0456\u0441\u0446\u0456. \u0421\u043a\u0456\u043d \u0431\u0435\u0440\u0435\u0442\u044c\u0441\u044f \u0437\u0430 \u043d\u0456\u043a\u043e\u043c \u0433\u0440\u0430\u0432\u0446\u044f (\u043f\u043e\u0442\u0440\u0456\u0431\u0435\u043d \u043e\u043d\u043b\u0430\u0439\u043d-\u0440\u0435\u0436\u0438\u043c \u0441\u0435\u0440\u0432\u0435\u0440\u0430).")), List.of(this.line("name", "Ім'я NPC (&-кольори, &#RRGGBB або <gradient:#f00:#00f>...)", "\u041d\u043e\u0432\u0438\u0439 NPC", 150), this.line("skin", "\u0421\u043a\u0456\u043d: \u043d\u0456\u043a \u0433\u0440\u0430\u0432\u0446\u044f", p.getName(), 16), this.line("mob", "Вигляд: тип моба (порожньо = людина зі скіном; напр. VILLAGER, COW, ALLAY)", "", 30)), (DialogType)type));
     }
 
     private void openSettings(Player p, Npc n) {
         List<ActionButton> buttons = List.of(this.btn("\u0406\u043c'\u044f \u0442\u0430 \u0441\u043a\u0456\u043d", v -> this.sync(() -> this.openIdentity(p, n))), this.btn("\u0414\u0456\u0430\u043b\u043e\u0433", v -> this.sync(() -> this.openNodeEditor(p, n, n.root))), this.btn("\u0423\u0433\u043e\u0434\u0438 (\u0442\u043e\u0440\u0433\u0456\u0432\u043b\u044f): " + n.trades.size(), v -> this.sync(() -> this.openTradeEditor(p, n))), this.btn("\u041f\u0435\u0440\u0435\u043c\u0456\u0441\u0442\u0438\u0442\u0438 \u0434\u043e \u043c\u0435\u043d\u0435", v -> this.sync(() -> {
-            Mannequin m = this.entityOf(n);
+            Entity m = this.entityOf(n);
             if (m != null) {
                 Location l = p.getLocation();
+                if (m.getVehicle() != null) {
+                    m.leaveVehicle();
+                }
+                this.dropSeat(n);
                 m.teleport(l);
                 n.loc = l.clone();
                 this.save();
@@ -556,7 +577,16 @@ TabExecutor {
                 p.sendMessage(this.text("&c\u0421\u0443\u0442\u043d\u0456\u0441\u0442\u044c NPC \u043d\u0435 \u0437\u043d\u0430\u0439\u0434\u0435\u043d\u043e (\u043c\u043e\u0436\u043b\u0438\u0432\u043e, \u0457\u0457 \u0432\u0431\u0438\u043b\u0438). \u0412\u0438\u0434\u0430\u043b\u0438 \u0439 \u0441\u0442\u0432\u043e\u0440\u0438 \u0437\u0430\u043d\u043e\u0432\u043e."));
             }
             this.openSettings(p, n);
-        })), this.btn("Меню вибору (GUI)", v -> this.sync(() -> this.openHubEditor(p, n))), this.btn("&6\u041a\u0432\u0435\u0441\u0442\u0438 (\u0440\u0435\u0434\u0430\u043a\u0442\u043e\u0440)", v -> this.sync(() -> this.openQuestList(p))), this.btn("&c\u0412\u0438\u0434\u0430\u043b\u0438\u0442\u0438 NPC", v -> this.sync(() -> this.openDelete(p, n))));
+        })), this.btn(n.mobType.isBlank() ? "Поза: " + QuestNPC.poseLabel(n.pose) : "&8Поза (лише для людей)", v -> this.sync(() -> {
+            if (n.mobType.isBlank()) {
+                n.pose = QuestNPC.nextPose(n.pose);
+                this.applyPoseNow(n);
+                this.save();
+            } else {
+                p.sendMessage(this.text("&cПоза доступна лише для NPC-людей (без типу моба)."));
+            }
+            this.openSettings(p, n);
+        })), this.btn("Розмови NPC", v -> this.sync(() -> this.openChatterList(p))), this.btn("Меню вибору (GUI)", v -> this.sync(() -> this.openHubEditor(p, n))), this.btn("&6\u041a\u0432\u0435\u0441\u0442\u0438 (\u0440\u0435\u0434\u0430\u043a\u0442\u043e\u0440)", v -> this.sync(() -> this.openQuestList(p))), this.btn("&c\u0412\u0438\u0434\u0430\u043b\u0438\u0442\u0438 NPC", v -> this.sync(() -> this.openDelete(p, n))));
         p.showDialog((DialogLike)this.dialog("&5NPC #" + n.id + ": " + n.name, List.of(this.para("\u0429\u043e \u0437\u043c\u0456\u043d\u0438\u0442\u0438?")), List.of(), (DialogType)DialogType.multiAction(buttons, (ActionButton)this.btn("&7\u0417\u0430\u043a\u0440\u0438\u0442\u0438", null), (int)1)));
     }
 
@@ -566,7 +596,13 @@ TabExecutor {
             String newSkin = QuestNPC.clean((String)v.apply("skin"), "");
             boolean skinChanged = !newSkin.equals(n.skin);
             n.skin = newSkin;
-            Mannequin m = this.entityOf(n);
+            String newMob = this.validMob(QuestNPC.clean((String)v.apply("mob"), ""));
+            boolean mobChanged = !newMob.equals(n.mobType);
+            n.mobType = newMob;
+            if (mobChanged) {
+                this.respawnNpc(n);
+            }
+            Entity m = this.entityOf(n);
             if (m != null) {
                 m.customName((Component)QuestNPC.colored(n.name));
             }
@@ -577,7 +613,7 @@ TabExecutor {
             p.sendMessage(this.text("&a\u0417\u0431\u0435\u0440\u0435\u0436\u0435\u043d\u043e."));
             this.openSettings(p, n);
         })), (ActionButton)this.btn("&7\u041d\u0430\u0437\u0430\u0434", v -> this.sync(() -> this.openSettings(p, n))));
-        p.showDialog((DialogLike)this.dialog("&5\u0406\u043c'\u044f \u0442\u0430 \u0441\u043a\u0456\u043d", List.of(this.para("\u0421\u043a\u0456\u043d \u0431\u0435\u0440\u0435\u0442\u044c\u0441\u044f \u0437\u0430 \u043d\u0456\u043a\u043e\u043c \u0433\u0440\u0430\u0432\u0446\u044f (\u043f\u043e\u0442\u0440\u0456\u0431\u0435\u043d \u043e\u043d\u043b\u0430\u0439\u043d-\u0440\u0435\u0436\u0438\u043c \u0441\u0435\u0440\u0432\u0435\u0440\u0430).")), List.of(this.line("name", "Ім'я NPC (&-кольори, &#RRGGBB або <gradient:#f00:#00f>...)", n.name, 150), this.line("skin", "\u0421\u043a\u0456\u043d: \u043d\u0456\u043a \u0433\u0440\u0430\u0432\u0446\u044f", n.skin, 16)), (DialogType)type));
+        p.showDialog((DialogLike)this.dialog("&5\u0406\u043c'\u044f \u0442\u0430 \u0441\u043a\u0456\u043d", List.of(this.para("\u0421\u043a\u0456\u043d \u0431\u0435\u0440\u0435\u0442\u044c\u0441\u044f \u0437\u0430 \u043d\u0456\u043a\u043e\u043c \u0433\u0440\u0430\u0432\u0446\u044f (\u043f\u043e\u0442\u0440\u0456\u0431\u0435\u043d \u043e\u043d\u043b\u0430\u0439\u043d-\u0440\u0435\u0436\u0438\u043c \u0441\u0435\u0440\u0432\u0435\u0440\u0430).")), List.of(this.line("name", "Ім'я NPC (&-кольори, &#RRGGBB або <gradient:#f00:#00f>...)", n.name, 150), this.line("skin", "\u0421\u043a\u0456\u043d: \u043d\u0456\u043a \u0433\u0440\u0430\u0432\u0446\u044f", n.skin, 16), this.line("mob", "Вигляд: тип моба (порожньо = людина зі скіном; напр. VILLAGER, COW, ALLAY)", n.mobType, 30)), (DialogType)type));
     }
 
     private String path(Node node) {
@@ -777,6 +813,9 @@ TabExecutor {
     }
 
     private void advance(Player p, Quest q, QState st) {
+        if (st.stage < q.stages.size()) {
+            this.sendStageChat(p, q, q.stages.get(st.stage));
+        }
         ++st.stage;
         st.count = 0;
         if (st.stage >= q.stages.size()) {
@@ -954,7 +993,8 @@ TabExecutor {
                 Quest q = this.quests.get(en.getKey());
                 if (q == null || !"ACTIVE".equals(st.status) || st.stage >= q.stages.size()) continue;
                 Stage sg = q.stages.get(st.stage);
-                if (!sg.type.equals("reach") || !this.inZone(p, sg)) continue;
+                boolean reached = sg.type.equals("reach") ? this.inZone(p, sg) : sg.type.equals("mob") && this.mobInZone(p, sg);
+                if (!reached) continue;
                 this.advance(p, q, st);
             }
         }
@@ -1050,6 +1090,8 @@ TabExecutor {
             String b = "npcs." + n.id + ".";
             y.set(b + "name", (Object)n.name);
             y.set(b + "skin", (Object)n.skin);
+            y.set(b + "mob-type", n.mobType);
+            y.set(b + "pose", n.pose);
             y.set(b + "world", (Object)n.loc.getWorld().getName());
             y.set(b + "x", (Object)n.loc.getX());
             y.set(b + "y", (Object)n.loc.getY());
@@ -1101,6 +1143,8 @@ TabExecutor {
                 Npc n = new Npc(Integer.parseInt(key));
                 n.name = s.getString("name", "NPC");
                 n.skin = s.getString("skin", "");
+                n.mobType = s.getString("mob-type", "");
+                n.pose = s.getString("pose", "stand");
                 n.loc = new Location(w, s.getDouble("x"), s.getDouble("y"), s.getDouble("z"), (float)s.getDouble("yaw"), 0.0f);
                 String ent = s.getString("entity");
                 n.entity = ent == null ? null : UUID.fromString(ent);
@@ -1274,6 +1318,8 @@ TabExecutor {
                 sg.text = QuestNPC.ms(m, "text", "");
                 sg.reply = QuestNPC.ms(m, "reply", "");
                 sg.replyFail = QuestNPC.ms(m, "reply-fail", "");
+                sg.chat = QuestNPC.ms(m, "chat", "");
+                sg.chatNpc = (int)QuestNPC.md(m, "chat-npc", -1.0);
                 switch (sg.type) {
                     case "reach": {
                         sg.world = QuestNPC.ms(m, "world", "world");
@@ -1303,6 +1349,28 @@ TabExecutor {
                         }
                         sg.amount = (int)QuestNPC.md(m, "amount", 1.0);
                         sg.npc = (int)QuestNPC.md(m, "npc", -1.0);
+                        break;
+                    }
+                    case "mob": {
+                        sg.world = QuestNPC.ms(m, "world", "world");
+                        sg.x = QuestNPC.md(m, "x", 0.0);
+                        sg.y = QuestNPC.md(m, "y", 64.0);
+                        sg.z = QuestNPC.md(m, "z", 0.0);
+                        sg.radius = QuestNPC.md(m, "radius", 5.0);
+                        sg.height = QuestNPC.md(m, "height", -1.0);
+                        sg.mobName = QuestNPC.ms(m, "mob-name", "");
+                        String metype = QuestNPC.ms(m, "entity", "");
+                        if (!metype.isEmpty()) {
+                            try {
+                                sg.entity = EntityType.valueOf(metype.toUpperCase(Locale.ROOT));
+                            } catch (IllegalArgumentException ex3) {
+                                this.getLogger().warning("Квест " + id + ", етап " + index + ": невідомий тип моба " + metype);
+                            }
+                        }
+                        if (sg.mobName.isBlank()) {
+                            this.getLogger().warning("Квест " + id + ", етап " + index + ": не вказано mob-name.");
+                            valid = false;
+                        }
                         break;
                     }
                     case "item": {
@@ -1596,6 +1664,14 @@ TabExecutor {
                 }
                 return true;
             }
+            case "chatter": {
+                if (!(s instanceof Player)) {
+                    s.sendMessage("Тільки для гравців.");
+                    return true;
+                }
+                this.openChatterList((Player) s);
+                return true;
+            }
             case "resetphrases": {
                 Player rp = a.length > 1 ? Bukkit.getPlayerExact(a[1]) : (s instanceof Player rpp ? rpp : null);
                 if (rp == null) {
@@ -1641,6 +1717,8 @@ TabExecutor {
             case "reload": {
                 this.reloadConfig();
                 this.loadQuests();
+                this.loadChatters();
+                this.reseatAll();
                 s.sendMessage("\u00a7aquests.yml \u043f\u0435\u0440\u0435\u0437\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0435\u043d\u043e. \u041a\u0432\u0435\u0441\u0442\u0456\u0432: " + this.quests.size());
                 break;
             }
@@ -1709,6 +1787,12 @@ TabExecutor {
                 if (!sg.replyFail.isBlank()) {
                     m.put("reply-fail", sg.replyFail);
                 }
+                if (!sg.chat.isBlank()) {
+                    m.put("chat", sg.chat);
+                }
+                if (sg.chatNpc >= 0) {
+                    m.put("chat-npc", sg.chatNpc);
+                }
                 switch (sg.type) {
                     case "reach" -> {
                         m.put("world", sg.world);
@@ -1728,6 +1812,20 @@ TabExecutor {
                         m.put("material", sg.material == null ? "STONE" : sg.material.name());
                         m.put("amount", sg.amount);
                         m.put("npc", sg.npc);
+                    }
+                    case "mob" -> {
+                        m.put("world", sg.world);
+                        m.put("x", sg.x);
+                        m.put("y", sg.y);
+                        m.put("z", sg.z);
+                        m.put("radius", sg.radius);
+                        if (sg.height >= 0.0) {
+                            m.put("height", sg.height);
+                        }
+                        m.put("mob-name", sg.mobName);
+                        if (sg.entity != null) {
+                            m.put("entity", sg.entity.name());
+                        }
                     }
                     case "item" -> {
                         m.put("stack", sg.stack);
@@ -1788,6 +1886,7 @@ TabExecutor {
             case "kill" -> "Вбити";
             case "deliver" -> "Віддати предмети (за назвою)";
             case "item" -> "Віддати предмет з лівої руки (точний)";
+            case "mob" -> "Привести моба в зону";
             case "talk" -> "Поговорити з NPC";
             default -> type;
         };
@@ -1958,7 +2057,7 @@ TabExecutor {
                 p.sendMessage(this.text("&cПоклади в ліву руку (клавіша F міняє руки) предмет, який хочеш додати в нагороду."));
             } else {
                 q.stacks.add(this.encode(held.clone()));
-                p.sendMessage(this.text("&aПредмет додано в нагороду (зачарування й назва збережені): &f" + held.getType().name() + " x" + held.getAmount()));
+                p.sendMessage(this.text("&aПредмет додано в нагороду (зачарування й назва збережені): &f" + this.itemNameStr(held) + " x" + held.getAmount()));
             }
             this.saveQuests();
             this.openQuestEditor(p, q);
@@ -2036,12 +2135,12 @@ TabExecutor {
             buttons.add(this.btn((i + 1) + ". " + QuestNPC.stageLabel(sg.type) + ": &7" + sg.text,
                 v -> this.sync(() -> this.openStageEditor(p, q, idx))));
         }
-        for (String t : new String[]{"reach", "kill", "deliver", "item", "talk"}) {
+        for (String t : new String[]{"reach", "mob", "kill", "deliver", "item", "talk"}) {
             buttons.add(this.btn("&a+ " + QuestNPC.stageLabel(t), v -> this.sync(() -> {
                 Stage sg = new Stage();
                 sg.type = t;
                 sg.text = QuestNPC.stageLabel(t);
-                if (t.equals("reach")) {
+                if (t.equals("reach") || t.equals("mob")) {
                     this.fillHere(sg, p);
                 } else if (t.equals("kill")) {
                     sg.entity = EntityType.ZOMBIE;
@@ -2117,6 +2216,33 @@ TabExecutor {
                         p.sendMessage(this.text("&eУвага: NPC #" + sg.npc + " не існує."));
                     }
                 }
+                case "mob" -> {
+                    String mworld = QuestNPC.clean(v.apply("world"), sg.world);
+                    if (Bukkit.getWorld(mworld) == null) {
+                        p.sendMessage(this.text("&cСвіт \"" + mworld + "\" не знайдено."));
+                        return false;
+                    }
+                    double mx = Double.parseDouble(QuestNPC.clean(v.apply("x"), "0").replace(',', '.'));
+                    double my = Double.parseDouble(QuestNPC.clean(v.apply("y"), "64").replace(',', '.'));
+                    double mz = Double.parseDouble(QuestNPC.clean(v.apply("z"), "0").replace(',', '.'));
+                    double mr = Math.max(1.0, Double.parseDouble(QuestNPC.clean(v.apply("radius"), "5").replace(',', '.')));
+                    String mh = QuestNPC.clean(v.apply("height"), "");
+                    String mname = QuestNPC.clean(v.apply("mobname"), "");
+                    if (mname.isEmpty()) {
+                        p.sendMessage(this.text("&cВкажи назву моба (як на бирці)."));
+                        return false;
+                    }
+                    String met = QuestNPC.clean(v.apply("entity"), "");
+                    EntityType mtype = met.isEmpty() ? null : EntityType.valueOf(met.toUpperCase(Locale.ROOT));
+                    sg.world = mworld;
+                    sg.x = mx;
+                    sg.y = my;
+                    sg.z = mz;
+                    sg.radius = mr;
+                    sg.height = mh.isEmpty() ? -1.0 : Math.max(0.0, Double.parseDouble(mh.replace(',', '.')));
+                    sg.mobName = mname;
+                    sg.entity = mtype;
+                }
                 case "item" -> {
                     sg.amount = Math.max(1, Integer.parseInt(QuestNPC.clean(v.apply("amount"), "1")));
                     sg.npc = Integer.parseInt(QuestNPC.clean(v.apply("npc"), "-1"));
@@ -2132,6 +2258,8 @@ TabExecutor {
                 }
                 default -> { }
             }
+            sg.chat = QuestNPC.clean(v.apply("chat"), "");
+            sg.chatNpc = Integer.parseInt(QuestNPC.clean(v.apply("chatnpc"), "-1"));
             if (sg.type.equals("deliver") || sg.type.equals("item") || sg.type.equals("talk")) {
                 sg.reply = QuestNPC.clean(v.apply("reply"), "");
                 sg.replyFail = QuestNPC.clean(v.apply("replyfail"), "");
@@ -2167,6 +2295,16 @@ TabExecutor {
                 inputs.add(this.line("amount", "Кількість", String.valueOf(sg.amount), 5));
                 inputs.add(this.line("npc", "№ NPC, якому віддати (-1 = забрати з інвентаря автоматично)", String.valueOf(sg.npc), 5));
             }
+            case "mob" -> {
+                inputs.add(this.line("world", "Світ", sg.world, 40));
+                inputs.add(this.line("x", "X (центр зони)", QuestNPC.num(sg.x), 12));
+                inputs.add(this.line("y", "Y", QuestNPC.num(sg.y), 12));
+                inputs.add(this.line("z", "Z", QuestNPC.num(sg.z), 12));
+                inputs.add(this.line("radius", "Радіус зони", QuestNPC.num(sg.radius), 8));
+                inputs.add(this.line("height", "Допуск по висоті (порожньо = як радіус)", sg.height < 0.0 ? "" : QuestNPC.num(sg.height), 8));
+                inputs.add(this.line("mobname", "Назва моба на бирці (як на name tag, без кольорів)", sg.mobName, 60));
+                inputs.add(this.line("entity", "Тип моба (необов'язково, напр. COW; порожньо = будь-який)", sg.entity == null ? "" : sg.entity.name(), 40));
+            }
             case "item" -> {
                 inputs.add(this.line("amount", "Кількість", String.valueOf(sg.amount), 5));
                 inputs.add(this.line("npc", "№ NPC, якому віддати (-1 = забрати з інвентаря автоматично)", String.valueOf(sg.npc), 5));
@@ -2180,6 +2318,8 @@ TabExecutor {
                 inputs.add(this.block("replyfail", "Відповідь NPC, якщо предмета немає (порожньо = лише повідомлення в чаті)", sg.replyFail, 300));
             }
         }
+        inputs.add(this.block("chat", "Повідомлення від NPC в чаті гравцю, коли етап виконано (порожньо = немає)", sg.chat, 300));
+        inputs.add(this.line("chatnpc", "№ NPC-мовця для цього повідомлення (-1 = NPC етапу або видавець квесту)", String.valueOf(sg.chatNpc), 5));
         List<ActionButton> buttons = new ArrayList<>();
         buttons.add(this.btn("&aЗберегти", v -> this.sync(() -> {
             if (this.applyStage(p, sg, v)) {
@@ -2188,7 +2328,7 @@ TabExecutor {
             }
             this.openStageEditor(p, q, idx);
         })));
-        if (sg.type.equals("reach")) {
+        if (sg.type.equals("reach") || sg.type.equals("mob")) {
             buttons.add(this.btn("Взяти мою позицію", v -> this.sync(() -> {
                 this.applyStage(p, sg, v);
                 this.fillHere(sg, p);
@@ -2221,6 +2361,22 @@ TabExecutor {
                 this.openStageEditor(p, q, idx);
             })));
         }
+        if (sg.type.equals("mob")) {
+            buttons.add(this.btn("&dВзяти моба, на якого дивлюся", v -> this.sync(() -> {
+                this.applyStage(p, sg, v);
+                Entity target = p.getTargetEntity(8);
+                Component cn = target == null ? null : target.customName();
+                if (target == null || target instanceof Player || cn == null) {
+                    p.sendMessage(this.text("&cПодивись на моба з биркою (name tag) на відстані до 8 блоків і натисни ще раз."));
+                } else {
+                    sg.mobName = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(cn).trim();
+                    sg.entity = target.getType();
+                    p.sendMessage(this.text("&aМоба взято: &f" + sg.mobName + " &7(" + target.getType().name() + ")"));
+                }
+                this.saveQuests();
+                this.openStageEditor(p, q, idx);
+            })));
+        }
         if (sg.type.equals("deliver")) {
             buttons.add(this.btn("&dВзяти предмет з лівої руки (точний, з зачаруваннями)", v -> this.sync(() -> {
                 this.applyStage(p, sg, v);
@@ -2232,7 +2388,7 @@ TabExecutor {
                     sg.amount = held.getAmount();
                     sg.material = held.getType();
                     sg.type = "item";
-                    p.sendMessage(this.text("&aТепер NPC прийме саме цей предмет (з назвою й зачаруваннями): &f" + held.getType().name() + " x" + held.getAmount()));
+                    p.sendMessage(this.text("&aТепер NPC прийме саме цей предмет (з назвою й зачаруваннями): &f" + this.itemNameStr(held) + " x" + held.getAmount()));
                 }
                 this.saveQuests();
                 this.openStageEditor(p, q, idx);
@@ -2248,7 +2404,7 @@ TabExecutor {
                     sg.stack = this.encode(held.clone());
                     sg.amount = held.getAmount();
                     sg.material = held.getType();
-                    p.sendMessage(this.text("&aПредмет оновлено: &f" + held.getType().name() + " x" + held.getAmount()));
+                    p.sendMessage(this.text("&aПредмет оновлено: &f" + this.itemNameStr(held) + " x" + held.getAmount()));
                 }
                 this.saveQuests();
                 this.openStageEditor(p, q, idx);
@@ -2333,7 +2489,7 @@ TabExecutor {
         if (!this.getConfig().getBoolean("bubble.enabled", true)) {
             return;
         }
-        Mannequin m = this.entityOf(n);
+        Entity m = this.entityOf(n);
         if (m == null) {
             return;
         }
@@ -2497,23 +2653,9 @@ TabExecutor {
                 ? "&eМожна взяти знову через: &f" + QuestNPC.fmtDuration(left / 1000L + 1L)
                 : "&7Повторюваний, кулдаун: &f" + QuestNPC.fmtDuration(q.cooldown), p)));
         }
-        List<String> rewards = new ArrayList<>();
-        if (q.xp > 0) {
-            rewards.add(q.xp + " досвіду");
-        }
-        for (String it : q.items) {
-            rewards.add(this.rewardLabel(it));
-        }
-        for (String enc : q.stacks) {
-            try {
-                ItemStack st0 = this.decode(enc);
-                rewards.add(st0.getAmount() + " x " + st0.getType().name() + (st0.hasItemMeta() ? " (особливий)" : ""));
-            } catch (RuntimeException ex) {
-                rewards.add("предмет (помилка читання)");
-            }
-        }
-        if (!rewards.isEmpty()) {
-            body.add(DialogBody.plainMessage((Component) this.fmt("&6Нагорода: &f" + String.join(", ", rewards), p)));
+        Component rw = this.rewardsComponent(q);
+        if (rw != null) {
+            body.add(DialogBody.plainMessage(rw));
         }
         if (q.dailyReset >= 0) {
             body.add(DialogBody.plainMessage((Component) this.fmt("&7Оновлюється щодня о &f" + QuestNPC.hhmm(q.dailyReset), p)));
@@ -2750,7 +2892,7 @@ TabExecutor {
     private String stackLabel(Stage sg) {
         try {
             ItemStack s0 = this.stackOf(sg.stack);
-            return s0.getType().name() + (s0.hasItemMeta() ? "*" : "");
+            return this.itemNameStr(s0);
         } catch (RuntimeException ex) {
             return "?";
         }
@@ -2972,6 +3114,16 @@ TabExecutor {
         if (sg.type.equals("talk")) {
             return out.append(this.npcSuffix(sg.npc));
         }
+        if (sg.type.equals("mob")) {
+            String near = "";
+            if (p.getWorld().getName().equals(sg.world)) {
+                double dx = p.getLocation().getX() - sg.x;
+                double dy = p.getLocation().getY() - sg.y;
+                double dz = p.getLocation().getZ() - sg.z;
+                near = " &8→ " + (int) Math.sqrt(dx * dx + dy * dy + dz * dz) + " м";
+            }
+            return out.append(LEGACY.deserialize(" &7(привести «" + sg.mobName + "»)" + near));
+        }
         return LEGACY.deserialize(this.describe(p, q, st));
     }
 
@@ -3061,9 +3213,9 @@ TabExecutor {
             sb.append("\n&7").append(i + 1).append(". &f").append(q.stages.get(i).text);
         }
         body.add(DialogBody.plainMessage((Component) this.fmt(sb.toString(), p)));
-        List<String> rewards = this.rewardList(q);
-        if (!rewards.isEmpty()) {
-            body.add(DialogBody.plainMessage((Component) this.fmt("&6Нагорода: &f" + String.join(", ", rewards), p)));
+        Component rw = this.rewardsComponent(q);
+        if (rw != null) {
+            body.add(DialogBody.plainMessage(rw));
         }
         if (q.repeatable) {
             body.add(DialogBody.plainMessage((Component) this.fmt(q.cooldown > 0L
@@ -3562,6 +3714,9 @@ TabExecutor {
             s1.stack = s0.stack;
             s1.reply = s0.reply;
             s1.replyFail = s0.replyFail;
+            s1.mobName = s0.mobName;
+            s1.chat = s0.chat;
+            s1.chatNpc = s0.chatNpc;
             c.stages.add(s1);
         }
         return c;
@@ -3637,7 +3792,7 @@ TabExecutor {
                     continue;
                 }
                 Entity ent = n.loc.getWorld().getEntity(n.entity);
-                if (!(ent instanceof Mannequin)) {
+                if (ent == null) {
                     continue;
                 }
                 Location at = ent.getLocation().add(0.0, ent.getHeight() + offset, 0.0);
@@ -4068,7 +4223,7 @@ TabExecutor {
 
     @EventHandler
     public void onCoinInteractEntity(org.bukkit.event.player.PlayerInteractEntityEvent e) {
-        if (e.getRightClicked() instanceof Mannequin) {
+        if (this.npcIdOf(e.getRightClicked()) != null) {
             return;
         }
         ItemStack hand = e.getPlayer().getInventory().getItem(e.getHand());
@@ -4192,6 +4347,602 @@ TabExecutor {
             (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(back)), (int) 1)));
     }
 
+    // ======================= v0.7.0: ВИГЛЯД МОБА, ПОЗИ, ЕТАП «ПРИВЕСТИ МОБА», ПОВІДОМЛЕННЯ NPC =======================
+
+    private Entity entityIfLoaded(Npc n) {
+        if (n.entity == null || n.loc == null || n.loc.getWorld() == null) {
+            return null;
+        }
+        if (!n.loc.getWorld().isChunkLoaded(n.loc.getBlockX() >> 4, n.loc.getBlockZ() >> 4)) {
+            return null;
+        }
+        return n.loc.getWorld().getEntity(n.entity);
+    }
+
+    /** Повертає назву типу моба, якщо його можна використати як вигляд NPC, інакше порожній рядок. */
+    private String validMob(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "";
+        }
+        try {
+            EntityType t = EntityType.valueOf(raw.trim().toUpperCase(Locale.ROOT).replace(' ', '_'));
+            if (!t.isAlive() || !t.isSpawnable() || t == EntityType.PLAYER || t == EntityType.WITHER
+                || t == EntityType.ENDER_DRAGON || t.name().equals("MANNEQUIN")) {
+                return "";
+            }
+            return t.name();
+        } catch (IllegalArgumentException ex) {
+            return "";
+        }
+    }
+
+    private Entity spawnNpcEntity(Npc n, Location loc) {
+        if (!n.mobType.isBlank()) {
+            try {
+                Entity e = loc.getWorld().spawnEntity(loc, EntityType.valueOf(n.mobType));
+                this.setup(e, n);
+                return e;
+            } catch (IllegalArgumentException ex) {
+                n.mobType = "";
+            }
+        }
+        return loc.getWorld().spawn(loc, Mannequin.class, mq -> this.setup(mq, n));
+    }
+
+    private void respawnNpc(Npc n) {
+        Entity old = this.entityOf(n);
+        Location at = old != null ? old.getLocation() : n.loc;
+        this.dropSeat(n);
+        if (old != null) {
+            old.remove();
+        }
+        Entity e = this.spawnNpcEntity(n, at);
+        n.entity = e.getUniqueId();
+        n.loc = at.clone();
+        this.applySkin(n);
+        this.save();
+    }
+
+    private void applyPose(Entity e, Npc n) {
+        if (!(e instanceof Mannequin)) {
+            return;
+        }
+        if (n.pose.equals("lie")) {
+            e.setPose(org.bukkit.entity.Pose.SLEEPING, true);
+        } else if (n.pose.equals("sneak")) {
+            e.setPose(org.bukkit.entity.Pose.SNEAKING, true);
+        } else {
+            e.setPose(org.bukkit.entity.Pose.STANDING, false);
+        }
+    }
+
+    private void dropSeat(Npc n) {
+        if (n.seat == null) {
+            return;
+        }
+        Entity st = n.loc != null && n.loc.getWorld() != null ? n.loc.getWorld().getEntity(n.seat) : null;
+        if (st != null) {
+            st.remove();
+        }
+        n.seat = null;
+    }
+
+    /** Раз на кілька секунд: тримає пози (лежить, присів) і саджає NPC, якщо обрано «сидить». */
+    private void maintainPoses() {
+        double off = this.getConfig().getDouble("pose.sit-offset", -0.5);
+        for (Npc n : this.npcs.values()) {
+            Entity e = this.entityIfLoaded(n);
+            if (!(e instanceof Mannequin)) {
+                continue;
+            }
+            if (n.pose.equals("lie")) {
+                if (e.getPose() != org.bukkit.entity.Pose.SLEEPING) {
+                    e.setPose(org.bukkit.entity.Pose.SLEEPING, true);
+                }
+            } else if (n.pose.equals("sneak")) {
+                if (e.getPose() != org.bukkit.entity.Pose.SNEAKING) {
+                    e.setPose(org.bukkit.entity.Pose.SNEAKING, true);
+                }
+            } else if (n.pose.equals("sit")) {
+                if (!(e.getVehicle() instanceof org.bukkit.entity.ArmorStand)) {
+                    this.dropSeat(n);
+                    org.bukkit.entity.ArmorStand seat = (org.bukkit.entity.ArmorStand) e.getWorld().spawnEntity(e.getLocation().add(0.0, off, 0.0), EntityType.ARMOR_STAND);
+                    seat.setInvisible(true);
+                    seat.setMarker(true);
+                    seat.setGravity(false);
+                    seat.setSilent(true);
+                    seat.setInvulnerable(true);
+                    seat.setPersistent(false);
+                    seat.addPassenger(e);
+                    n.seat = seat.getUniqueId();
+                }
+            } else {
+                if (e.getVehicle() instanceof org.bukkit.entity.ArmorStand) {
+                    e.leaveVehicle();
+                    this.dropSeat(n);
+                }
+                if (e.getPose() != org.bukkit.entity.Pose.STANDING) {
+                    e.setPose(org.bukkit.entity.Pose.STANDING, false);
+                }
+            }
+        }
+    }
+
+    private void reseatAll() {
+        for (Npc n : this.npcs.values()) {
+            Entity e = this.entityIfLoaded(n);
+            if (e != null && e.getVehicle() instanceof org.bukkit.entity.ArmorStand) {
+                e.leaveVehicle();
+            }
+            this.dropSeat(n);
+        }
+    }
+
+    private static String poseLabel(String pose) {
+        return switch (pose) {
+            case "lie" -> "лежить";
+            case "sit" -> "сидить";
+            case "sneak" -> "присів";
+            default -> "стоїть";
+        };
+    }
+
+    private static String nextPose(String pose) {
+        return switch (pose) {
+            case "stand" -> "sit";
+            case "sit" -> "lie";
+            case "lie" -> "sneak";
+            default -> "stand";
+        };
+    }
+
+    private void applyPoseNow(Npc n) {
+        Entity e = this.entityOf(n);
+        if (e == null) {
+            return;
+        }
+        if (e.getVehicle() instanceof org.bukkit.entity.ArmorStand && !n.pose.equals("sit")) {
+            e.leaveVehicle();
+            this.dropSeat(n);
+        }
+        this.applyPose(e, n);
+        this.maintainPoses();
+    }
+
+    // ---- повідомлення від NPC в чаті гравцю при завершенні етапу ----
+
+    private void sendStageChat(Player p, Quest q, Stage sg) {
+        if (sg.chat == null || sg.chat.isBlank()) {
+            return;
+        }
+        int id = sg.chatNpc >= 0 ? sg.chatNpc : (sg.npc >= 0 ? sg.npc : q.giver);
+        Npc n = id >= 0 ? this.npcs.get(id) : null;
+        Component who = n != null ? QuestNPC.colored(n.name) : LEGACY.deserialize("&6Квест");
+        p.sendMessage(who.append(LEGACY.deserialize(" &8» &f")).append(this.fmt(sg.chat, p)));
+    }
+
+    // ---- етап «привести моба з певною биркою в зону» ----
+
+    private boolean mobInZone(Player p, Stage sg) {
+        World w = Bukkit.getWorld(sg.world);
+        if (w == null || !p.getWorld().equals(w) || sg.mobName == null || sg.mobName.isBlank()) {
+            return false;
+        }
+        Location c = new Location(w, sg.x, sg.y, sg.z);
+        double near = sg.radius + 12.0;
+        if (p.getLocation().distanceSquared(c) > near * near) {
+            return false;
+        }
+        double vertical = sg.height >= 0.0 ? sg.height : sg.radius;
+        for (Entity e : w.getNearbyEntities(c, sg.radius, vertical, sg.radius)) {
+            if (!(e instanceof org.bukkit.entity.LivingEntity) || e instanceof Player || this.npcIdOf(e) != null) {
+                continue;
+            }
+            if (sg.entity != null && e.getType() != sg.entity) {
+                continue;
+            }
+            Component cn = e.customName();
+            if (cn == null) {
+                continue;
+            }
+            String plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(cn).trim();
+            if (plain.equalsIgnoreCase(sg.mobName.trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ---- назви предметів у нагородах (кастомна назва замість CUBLESTONE) ----
+
+    private Component itemName(ItemStack it) {
+        ItemMeta im = it.getItemMeta();
+        if (im != null && im.hasDisplayName() && im.displayName() != null) {
+            return im.displayName().decoration(net.kyori.adventure.text.format.TextDecoration.ITALIC, false);
+        }
+        return Component.translatable(it.getType().translationKey());
+    }
+
+    private String itemNameStr(ItemStack it) {
+        ItemMeta im = it.getItemMeta();
+        if (im != null && im.hasDisplayName() && im.displayName() != null) {
+            return LEGACY.serialize(im.displayName());
+        }
+        String n = it.getType().name().toLowerCase(Locale.ROOT).replace('_', ' ');
+        return n.substring(0, 1).toUpperCase(Locale.ROOT) + n.substring(1);
+    }
+
+    private Component rewardsComponent(Quest q) {
+        List<Component> parts = new ArrayList<>();
+        if (q.xp > 0) {
+            parts.add(Component.text(q.xp + " досвіду"));
+        }
+        for (String it : q.items) {
+            String[] sp = it.split(":");
+            Material mat = it.toLowerCase(Locale.ROOT).startsWith("currency:") ? null : Material.matchMaterial(sp[0].trim());
+            if (mat != null) {
+                parts.add(Component.text((sp.length > 1 ? sp[1].trim() : "1") + " x ").append(Component.translatable(mat.translationKey())));
+            } else {
+                parts.add(LEGACY.deserialize(this.rewardLabel(it)));
+            }
+        }
+        for (String enc : q.stacks) {
+            try {
+                ItemStack st0 = this.decode(enc);
+                parts.add(Component.text(st0.getAmount() + " x ").append(this.itemName(st0)));
+            } catch (RuntimeException ex) {
+                parts.add(Component.text("предмет"));
+            }
+        }
+        if (parts.isEmpty()) {
+            return null;
+        }
+        Component out = LEGACY.deserialize("&6Нагорода: &f");
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0) {
+                out = out.append(Component.text(", "));
+            }
+            out = out.append(parts.get(i).colorIfAbsent(net.kyori.adventure.text.format.NamedTextColor.WHITE));
+        }
+        return out;
+    }
+
+    // ======================= v0.7.0: РОЗМОВИ МІЖ NPC =======================
+
+    static final class ChatLine {
+        int npc;
+        long delay = 4L;
+        String text = "";
+
+        ChatLine() {
+        }
+    }
+
+    static final class Chatter {
+        String id;
+        String name;
+        long interval = 2400L;
+        double range = 24.0;
+        boolean enabled = true;
+        List<ChatLine> lines = new ArrayList<ChatLine>();
+        long nextAt = 0L;
+        boolean playing = false;
+
+        Chatter() {
+        }
+    }
+
+    private final Map<String, Chatter> chatters = new LinkedHashMap<>();
+    private final Map<Integer, org.bukkit.entity.TextDisplay> npcBubbles = new HashMap<>();
+
+    private File chatterFile() {
+        return new File(this.getDataFolder(), "chatter.yml");
+    }
+
+    private void loadChatters() {
+        this.chatters.clear();
+        File f = this.chatterFile();
+        if (!f.exists()) {
+            return;
+        }
+        YamlConfiguration y = YamlConfiguration.loadConfiguration(f);
+        ConfigurationSection sec = y.getConfigurationSection("conversations");
+        if (sec == null) {
+            return;
+        }
+        for (String id : sec.getKeys(false)) {
+            ConfigurationSection s = sec.getConfigurationSection(id);
+            if (s == null) {
+                continue;
+            }
+            Chatter ch = new Chatter();
+            ch.id = id.toLowerCase(Locale.ROOT);
+            ch.name = s.getString("name", ch.id);
+            ch.interval = Math.max(10L, s.getLong("interval", 2400L));
+            ch.range = Math.max(4.0, s.getDouble("range", 24.0));
+            ch.enabled = s.getBoolean("enabled", true);
+            for (Map m : s.getMapList("lines")) {
+                ChatLine l = new ChatLine();
+                l.npc = (int) QuestNPC.md(m, "npc", -1.0);
+                l.delay = Math.max(1L, (long) QuestNPC.md(m, "delay", 4.0));
+                l.text = QuestNPC.ms(m, "text", "");
+                if (!l.text.isBlank()) {
+                    ch.lines.add(l);
+                }
+            }
+            ch.nextAt = System.currentTimeMillis() + 60000L;
+            this.chatters.put(ch.id, ch);
+        }
+        this.getLogger().info("Завантажено розмов NPC: " + this.chatters.size());
+    }
+
+    private void saveChatters() {
+        YamlConfiguration y = new YamlConfiguration();
+        for (Chatter ch : this.chatters.values()) {
+            String b = "conversations." + ch.id + ".";
+            y.set(b + "name", ch.name);
+            y.set(b + "interval", ch.interval);
+            y.set(b + "range", ch.range);
+            y.set(b + "enabled", ch.enabled);
+            List<Map<String, Object>> ls = new ArrayList<>();
+            for (ChatLine l : ch.lines) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("npc", l.npc);
+                m.put("delay", l.delay);
+                m.put("text", l.text);
+                ls.add(m);
+            }
+            y.set(b + "lines", ls);
+        }
+        try {
+            y.save(this.chatterFile());
+        } catch (IOException ex) {
+            this.getLogger().severe("Не вдалося зберегти chatter.yml: " + ex.getMessage());
+        }
+    }
+
+    private List<Player> chatterAudience(Chatter ch) {
+        List<Player> out = new ArrayList<>();
+        for (Player pl : Bukkit.getOnlinePlayers()) {
+            for (ChatLine l : ch.lines) {
+                Npc n = this.npcs.get(l.npc);
+                if (n == null || n.loc == null || n.loc.getWorld() == null || !n.loc.getWorld().equals(pl.getWorld())) {
+                    continue;
+                }
+                if (n.loc.distanceSquared(pl.getLocation()) <= ch.range * ch.range) {
+                    out.add(pl);
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
+    private void tickChatters() {
+        long now = System.currentTimeMillis();
+        for (Chatter ch : this.chatters.values()) {
+            if (!ch.enabled || ch.playing || ch.lines.size() < 2 || ch.nextAt > now) {
+                continue;
+            }
+            if (!this.chatterAudience(ch).isEmpty()) {
+                this.playChatter(ch);
+            }
+        }
+    }
+
+    /** Відтворює розмову: фрази йдуть по черзі, кожна з паузою після попередньої. */
+    private void playChatter(Chatter ch) {
+        ch.playing = true;
+        long at = 0L;
+        for (int i = 0; i < ch.lines.size(); i++) {
+            ChatLine l = ch.lines.get(i);
+            at += i == 0 ? 0L : Math.max(1L, l.delay) * 20L;
+            final boolean last = i == ch.lines.size() - 1;
+            Bukkit.getScheduler().runTaskLater((Plugin) this, () -> {
+                this.npcSay(ch, l);
+                if (last) {
+                    ch.playing = false;
+                    ch.nextAt = System.currentTimeMillis() + ch.interval * 1000L;
+                }
+            }, at);
+        }
+    }
+
+    private void npcSay(Chatter ch, ChatLine l) {
+        Npc n = this.npcs.get(l.npc);
+        if (n == null) {
+            return;
+        }
+        Entity e = this.entityIfLoaded(n);
+        if (e == null) {
+            return;
+        }
+        org.bukkit.entity.TextDisplay old = this.npcBubbles.remove(n.id);
+        if (old != null && old.isValid()) {
+            old.remove();
+        }
+        String t = l.text.replaceAll("\\s*\\R\\s*", " ").strip();
+        int max = Math.max(20, this.getConfig().getInt("bubble.max-length", 140));
+        if (t.length() > max) {
+            t = t.substring(0, max).stripTrailing();
+            if (t.endsWith("&")) {
+                t = t.substring(0, t.length() - 1);
+            }
+            t = t + "…";
+        }
+        final String shown = t;
+        Location at = e.getLocation().add(0.0, e.getHeight() + this.getConfig().getDouble("bubble.height-offset", 0.7), 0.0);
+        org.bukkit.entity.TextDisplay d = e.getWorld().spawn(at, org.bukkit.entity.TextDisplay.class, d0 -> {
+            d0.setPersistent(false);
+            d0.text(LEGACY.deserialize(shown));
+            d0.setBillboard(org.bukkit.entity.Display.Billboard.CENTER);
+            d0.setAlignment(org.bukkit.entity.TextDisplay.TextAlignment.CENTER);
+            d0.setLineWidth(180);
+        });
+        this.npcBubbles.put(n.id, d);
+        long ticks = Math.max(60L, Math.min(300L, 40L + (long) shown.length() * 3L));
+        Bukkit.getScheduler().runTaskLater((Plugin) this, () -> {
+            if (this.npcBubbles.get(n.id) == d) {
+                this.npcBubbles.remove(n.id);
+            }
+            if (d.isValid()) {
+                d.remove();
+            }
+        }, ticks);
+        if (this.getConfig().getBoolean("chatter.chat-messages", false)) {
+            Component msg = QuestNPC.colored(n.name).append(LEGACY.deserialize(" &8» &f" + l.text));
+            for (Player pl : this.chatterAudience(ch)) {
+                pl.sendMessage(msg);
+            }
+        }
+    }
+
+    private String chatterLinesText(Chatter ch) {
+        StringBuilder sb = new StringBuilder();
+        for (ChatLine l : ch.lines) {
+            if (sb.length() > 0) {
+                sb.append("\n");
+            }
+            sb.append(l.npc).append("|").append(l.delay).append("|").append(l.text);
+        }
+        return sb.toString();
+    }
+
+    private void applyChatter(Player p, Chatter ch, Function<String, String> v) {
+        ch.name = QuestNPC.clean(v.apply("chname"), ch.id);
+        long iv = QuestNPC.parseDuration(v.apply("chint"));
+        if (iv > 0L) {
+            ch.interval = Math.max(10L, iv);
+        } else {
+            p.sendMessage(this.text("&cІнтервал має бути часом, напр. 40m - залишено попереднє значення."));
+        }
+        try {
+            ch.range = Math.max(4.0, Double.parseDouble(QuestNPC.clean(v.apply("chrange"), "24").replace(',', '.')));
+        } catch (NumberFormatException ex) {
+            p.sendMessage(this.text("&cРадіус має бути числом - залишено попереднє значення."));
+        }
+        List<ChatLine> out = new ArrayList<>();
+        for (String raw : QuestNPC.lines(v.apply("chlines"))) {
+            String[] part = raw.split("\\|", 3);
+            try {
+                ChatLine l = new ChatLine();
+                l.npc = Integer.parseInt(part[0].trim());
+                if (part.length == 3) {
+                    l.delay = Math.max(1L, QuestNPC.parseDuration(part[1]));
+                    l.text = part[2].trim();
+                } else if (part.length == 2) {
+                    l.text = part[1].trim();
+                } else {
+                    throw new NumberFormatException("format");
+                }
+                if (l.text.isBlank()) {
+                    throw new NumberFormatException("empty");
+                }
+                if (!this.npcs.containsKey(l.npc)) {
+                    p.sendMessage(this.text("&eУвага: NPC #" + l.npc + " не існує, фраза пропущена: &f" + raw));
+                    continue;
+                }
+                out.add(l);
+            } catch (NumberFormatException ex) {
+                p.sendMessage(this.text("&cРядок пропущено (формат: №NPC|пауза|текст): &f" + raw));
+            }
+        }
+        ch.lines = out;
+    }
+
+    private void openChatterList(Player p) {
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(this.btn("&a+ Нова розмова", v -> this.sync(() -> this.openChatterNew(p))));
+        for (Chatter ch : this.chatters.values()) {
+            buttons.add(this.btn((ch.enabled ? "&a" : "&7") + ch.name + " &8(" + ch.lines.size() + " фраз)", v -> this.sync(() -> this.openChatterEditor(p, ch))));
+        }
+        p.showDialog((DialogLike) this.dialog("&bРозмови NPC",
+            List.of(this.para("Розмова - це черга фраз кількох NPC, що виглядає як переписка між ними. Запускається раз на інтервал, коли поруч є гравець.")),
+            List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Закрити", null), (int) 1)));
+    }
+
+    private void openChatterNew(Player p) {
+        ConfirmationType type = DialogType.confirmation(
+            (ActionButton) this.btn("&aСтворити", v -> this.sync(() -> {
+                String name = QuestNPC.clean(v.apply("chname"), "");
+                if (name.isEmpty()) {
+                    p.sendMessage(this.text("&cВведи назву розмови."));
+                    this.openChatterNew(p);
+                    return;
+                }
+                String base = QuestNPC.slug(name);
+                String id = base;
+                int i = 2;
+                while (this.chatters.containsKey(id)) {
+                    id = base + "_" + i++;
+                }
+                Chatter ch = new Chatter();
+                ch.id = id;
+                ch.name = name;
+                ch.nextAt = System.currentTimeMillis() + 60000L;
+                this.chatters.put(id, ch);
+                this.saveChatters();
+                p.sendMessage(this.text("&aРозмову створено. Додай фрази."));
+                this.openChatterEditor(p, ch);
+            })),
+            (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openChatterList(p))));
+        p.showDialog((DialogLike) this.dialog("&bНова розмова",
+            List.of(this.para("Достатньо назви. Фрази, інтервал і радіус налаштуєш далі.")),
+            List.of(this.line("chname", "Назва розмови", "", 60)),
+            (DialogType) type));
+    }
+
+    private void openChatterEditor(Player p, Chatter ch) {
+        List<DialogInput> inputs = new ArrayList<>();
+        inputs.add(this.line("chname", "Назва розмови", ch.name, 60));
+        inputs.add(this.line("chint", "Як часто запускати (напр. 40m, 1h; рахується після кінця розмови)", ch.interval + "s", 12));
+        inputs.add(this.line("chrange", "Радіус: розмова йде, коли гравець ближче цієї відстані до будь-кого з NPC (блоки)", String.valueOf(ch.range), 6));
+        inputs.add(this.block("chlines", "Фрази, по одній в рядок: №NPC|пауза перед фразою (с)|текст", this.chatterLinesText(ch), 1500));
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(this.btn("&aЗберегти", v -> this.sync(() -> {
+            this.applyChatter(p, ch, v);
+            this.saveChatters();
+            p.sendMessage(this.text("&aРозмову збережено."));
+            this.openChatterEditor(p, ch);
+        })));
+        buttons.add(this.btn("Увімкнена: " + (ch.enabled ? "&aтак" : "&cні"), v -> this.sync(() -> {
+            this.applyChatter(p, ch, v);
+            ch.enabled = !ch.enabled;
+            this.saveChatters();
+            this.openChatterEditor(p, ch);
+        })));
+        buttons.add(this.btn("&dВідтворити зараз (тест)", v -> this.sync(() -> {
+            this.applyChatter(p, ch, v);
+            this.saveChatters();
+            if (ch.lines.size() < 2) {
+                p.sendMessage(this.text("&cДля розмови потрібно хоча б 2 фрази."));
+            } else if (ch.playing) {
+                p.sendMessage(this.text("&eРозмова вже йде."));
+            } else {
+                this.playChatter(ch);
+                p.sendMessage(this.text("&aРозмову запущено. Підійди до NPC, щоб побачити фрази над їхніми головами."));
+            }
+            this.openChatterEditor(p, ch);
+        })));
+        buttons.add(this.btn("&cВидалити розмову", v -> this.sync(() -> {
+            ConfirmationType type = DialogType.confirmation(
+                (ActionButton) this.btn("&cТак, видалити", v2 -> this.sync(() -> {
+                    this.chatters.remove(ch.id);
+                    this.saveChatters();
+                    p.sendMessage(this.text("&aРозмову видалено."));
+                    this.openChatterList(p);
+                })),
+                (ActionButton) this.btn("&7Ні", v2 -> this.sync(() -> this.openChatterEditor(p, ch))));
+            p.showDialog((DialogLike) this.dialog("&cВидалити розмову?",
+                List.of(this.para("Розмова «" + ch.name + "» буде видалена.")), List.of(), (DialogType) type));
+        })));
+        p.showDialog((DialogLike) this.dialog("&bРозмова: " + ch.id,
+            List.of(this.para("Приклад фраз:\n1|0|Чув, що в лісі знову бродять зомбі?\n2|4|Так, треба сказати Бородатому.\n1|5|Він усе одно не слухає...")),
+            inputs,
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openChatterList(p))), (int) 1)));
+    }
+
     private Npc byArg(String[] a) {
         if (a.length < 2) {
             return null;
@@ -4209,7 +4960,7 @@ TabExecutor {
             return List.of();
         }
         if (a.length == 1) {
-            return List.of("give", "list", "remove", "tp", "here", "quests", "editor", "version", "markers", "resetphrases", "currency", "reload").stream().filter(x -> x.startsWith(a[0].toLowerCase())).toList();
+            return List.of("give", "list", "remove", "tp", "here", "quests", "editor", "version", "markers", "resetphrases", "chatter", "currency", "reload").stream().filter(x -> x.startsWith(a[0].toLowerCase())).toList();
         }
         if (a.length == 2 && (a[0].equalsIgnoreCase("remove") || a[0].equalsIgnoreCase("tp"))) {
             return this.npcs.keySet().stream().map(String::valueOf).filter(x -> x.startsWith(a[1])).toList();
@@ -4221,6 +4972,9 @@ TabExecutor {
         final int id;
         String name = "NPC";
         String skin = "";
+        String mobType = "";
+        String pose = "stand";
+        java.util.UUID seat;
         String hubText = "";
         String tradeLabel = "";
         String dialogLabel = "";
@@ -4357,6 +5111,9 @@ TabExecutor {
         String stack = "";
         String reply = "";
         String replyFail = "";
+        String mobName = "";
+        String chat = "";
+        int chatNpc = -1;
 
         Stage() {
         }
