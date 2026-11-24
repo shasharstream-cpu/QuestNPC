@@ -215,6 +215,7 @@ TabExecutor {
         this.getServer().getScheduler().runTaskTimer((Plugin)this, this::updateTrackers, 40L, 20L);
         this.getServer().getScheduler().runTaskTimer((Plugin)this, this::tickChatters, 200L, 20L);
         this.getServer().getScheduler().runTaskTimer((Plugin)this, this::maintainPoses, 100L, 100L);
+        this.hookTradeEvents();
         this.getServer().getScheduler().runTaskTimer((Plugin)this, () -> {
             if (this.progressDirty) {
                 this.saveProgress();
@@ -715,6 +716,10 @@ TabExecutor {
     @EventHandler
     public void onInventoryClose(InventoryCloseEvent e) {
         InventoryHolder inventoryHolder = e.getInventory().getHolder();
+        if (inventoryHolder instanceof PoolChest pcst) {
+            this.savePoolChest(e, pcst);
+            return;
+        }
         if (!(inventoryHolder instanceof TradeEditor)) {
             return;
         }
@@ -817,6 +822,7 @@ TabExecutor {
             this.sendStageChat(p, q, q.stages.get(st.stage));
         }
         ++st.stage;
+        st.pool = null;
         st.count = 0;
         if (st.stage >= q.stages.size()) {
             if (q.turnIn) {
@@ -1342,6 +1348,26 @@ TabExecutor {
                         sg.npc = (int)QuestNPC.md(m, "npc", -1.0);
                         break;
                     }
+                    case "break":
+                    case "harvest":
+                    case "honey":
+                    case "breed":
+                    case "craft":
+                    case "trade": {
+                        sg.targets = QuestNPC.ms(m, "targets", "");
+                        sg.amount = Math.max(1, (int)QuestNPC.md(m, "amount", 1.0));
+                        Object zoneVal = m.get("zone");
+                        sg.zone = zoneVal instanceof Boolean zb && zb;
+                        if (sg.zone) {
+                            sg.world = QuestNPC.ms(m, "world", "world");
+                            sg.x = QuestNPC.md(m, "x", 0.0);
+                            sg.y = QuestNPC.md(m, "y", 64.0);
+                            sg.z = QuestNPC.md(m, "z", 0.0);
+                            sg.radius = QuestNPC.md(m, "radius", 5.0);
+                            sg.height = QuestNPC.md(m, "height", -1.0);
+                        }
+                        break;
+                    }
                     case "mob": {
                         sg.world = QuestNPC.ms(m, "world", "world");
                         sg.x = QuestNPC.md(m, "x", 0.0);
@@ -1361,6 +1387,37 @@ TabExecutor {
                         if (sg.mobName.isBlank()) {
                             this.getLogger().warning("Квест " + id + ", етап " + index + ": не вказано mob-name.");
                             valid = false;
+                        }
+                        break;
+                    }
+                    case "pool": {
+                        sg.npc = (int)QuestNPC.md(m, "npc", -1.0);
+                        Object poolObj = m.get("pool");
+                        if (poolObj instanceof List<?> poolRaw) {
+                            for (Object po : poolRaw) {
+                                if (!(po instanceof Map<?, ?> pm)) {
+                                    continue;
+                                }
+                                PoolItem pit = new PoolItem();
+                                pit.exact = Boolean.TRUE.equals(pm.get("exact"));
+                                pit.amount = pm.get("amount") instanceof Number an ? Math.max(1L, an.longValue()) : 1L;
+                                if (pit.exact) {
+                                    pit.stack = String.valueOf(pm.get("stack"));
+                                    try {
+                                        pit.material = this.decode(pit.stack).getType();
+                                    } catch (RuntimeException exd) {
+                                        this.getLogger().warning("Квест " + id + ", етап " + index + ": пошкоджений предмет у наборі.");
+                                        continue;
+                                    }
+                                } else {
+                                    pit.material = Material.matchMaterial(String.valueOf(pm.get("material")));
+                                    if (pit.material == null) {
+                                        this.getLogger().warning("Квест " + id + ", етап " + index + ": невідомий матеріал у наборі: " + pm.get("material"));
+                                        continue;
+                                    }
+                                }
+                                sg.pool.add(pit);
+                            }
                         }
                         break;
                     }
@@ -1480,6 +1537,13 @@ TabExecutor {
                     st.count = qs.getInt("count", 0);
                     st.doneAt = qs.getLong("doneAt", 0L);
                     st.startedAt = qs.getLong("startedAt", 0L);
+                    List<Long> poolLoaded = qs.getLongList("pool");
+                    if (!poolLoaded.isEmpty()) {
+                        st.pool = new long[poolLoaded.size()];
+                        for (int pi0 = 0; pi0 < st.pool.length; pi0++) {
+                            st.pool[pi0] = poolLoaded.get(pi0);
+                        }
+                    }
                     map.put(qid, st);
                 }
                 this.progress.put(uuid, map);
@@ -1499,6 +1563,13 @@ TabExecutor {
                 y.set(b + "count", (Object)qe.getValue().count);
                 y.set(b + "doneAt", (Object)qe.getValue().doneAt);
                 y.set(b + "startedAt", (Object)qe.getValue().startedAt);
+                if (qe.getValue().pool != null) {
+                    List<Long> poolDone = new ArrayList<>();
+                    for (long x0 : qe.getValue().pool) {
+                        poolDone.add(x0);
+                    }
+                    y.set(b + "pool", poolDone);
+                }
             }
         }
         for (Map.Entry<UUID, Map<String, Long>> ue : this.choiceUses.entrySet()) {
@@ -1595,6 +1666,16 @@ TabExecutor {
                         .append(Component.text(" " + q.name + " (етапів: " + q.stages.size() + (q.turnIn ? ", зі здачею" : "") + ")", net.kyori.adventure.text.format.NamedTextColor.WHITE)));
                 }
                 break;
+            }
+            case "sheet": {
+                Player sp = a.length > 1 ? Bukkit.getPlayerExact(a[1]) : (s instanceof Player spp ? spp : null);
+                if (sp == null) {
+                    s.sendMessage("Гравця не знайдено. Використання: /mizkoprav sheet [нік]");
+                    return true;
+                }
+                sp.getInventory().addItem(new ItemStack[]{this.makeSheet()}).values().forEach(rest -> sp.getWorld().dropItemNaturally(sp.getLocation(), rest));
+                s.sendMessage(this.text("&aАркуш «Список завдань» видано: &f" + sp.getName()));
+                return true;
             }
             case "chatter": {
                 if (!(s instanceof Player)) {
@@ -1745,6 +1826,23 @@ TabExecutor {
                         m.put("amount", sg.amount);
                         m.put("npc", sg.npc);
                     }
+                    case "break", "harvest", "honey", "breed", "craft", "trade" -> {
+                        if (!sg.targets.isBlank()) {
+                            m.put("targets", sg.targets);
+                        }
+                        m.put("amount", sg.amount);
+                        if (sg.zone) {
+                            m.put("zone", true);
+                            m.put("world", sg.world);
+                            m.put("x", sg.x);
+                            m.put("y", sg.y);
+                            m.put("z", sg.z);
+                            m.put("radius", sg.radius);
+                            if (sg.height >= 0.0) {
+                                m.put("height", sg.height);
+                            }
+                        }
+                    }
                     case "mob" -> {
                         m.put("world", sg.world);
                         m.put("x", sg.x);
@@ -1758,6 +1856,22 @@ TabExecutor {
                         if (sg.entity != null) {
                             m.put("entity", sg.entity.name());
                         }
+                    }
+                    case "pool" -> {
+                        m.put("npc", sg.npc);
+                        List<Map<String, Object>> poolList = new ArrayList<>();
+                        for (PoolItem pit : sg.pool) {
+                            Map<String, Object> pm = new LinkedHashMap<>();
+                            if (pit.exact) {
+                                pm.put("stack", pit.stack);
+                                pm.put("exact", true);
+                            } else {
+                                pm.put("material", pit.material == null ? "STONE" : pit.material.name());
+                            }
+                            pm.put("amount", pit.amount);
+                            poolList.add(pm);
+                        }
+                        m.put("pool", poolList);
                     }
                     case "item" -> {
                         m.put("stack", sg.stack);
@@ -1819,6 +1933,13 @@ TabExecutor {
             case "deliver" -> "Віддати предмети (за назвою)";
             case "item" -> "Віддати предмет з лівої руки (точний)";
             case "mob" -> "Привести моба в зону";
+            case "pool" -> "Набір предметів (кілька, скриня)";
+            case "break" -> "Добути блоки";
+            case "harvest" -> "Зібрати урожай";
+            case "honey" -> "Добути мед";
+            case "breed" -> "Розвести тварин";
+            case "craft" -> "Скрафтити";
+            case "trade" -> "Поторгувати";
             case "talk" -> "Поговорити з NPC";
             default -> type;
         };
@@ -2058,33 +2179,7 @@ TabExecutor {
             buttons.add(this.btn((i + 1) + ". " + QuestNPC.stageLabel(sg.type) + ": &7" + sg.text,
                 v -> this.sync(() -> this.openStageEditor(p, q, idx))));
         }
-        for (String t : new String[]{"reach", "mob", "kill", "deliver", "item", "talk"}) {
-            buttons.add(this.btn("&a+ " + QuestNPC.stageLabel(t), v -> this.sync(() -> {
-                Stage sg = new Stage();
-                sg.type = t;
-                sg.text = QuestNPC.stageLabel(t);
-                if (t.equals("reach") || t.equals("mob")) {
-                    this.fillHere(sg, p);
-                } else if (t.equals("kill")) {
-                    sg.entity = EntityType.ZOMBIE;
-                } else if (t.equals("deliver")) {
-                    sg.material = Material.STONE;
-                } else if (t.equals("item")) {
-                    ItemStack held = p.getInventory().getItemInOffHand();
-                    if (held.getType().isAir()) {
-                        p.sendMessage(this.text("&cПоклади в ліву руку (клавіша F міняє руки) предмет, який треба принести NPC, і натисни ще раз."));
-                        this.openStages(p, q);
-                        return;
-                    }
-                    sg.stack = this.encode(held.clone());
-                    sg.amount = held.getAmount();
-                    sg.material = held.getType();
-                }
-                q.stages.add(sg);
-                this.saveQuests();
-                this.openStageEditor(p, q, q.stages.size() - 1);
-            })));
-        }
+        buttons.add(this.btn("&a+ Додати етап...", v -> this.sync(() -> this.openStageCategories(p, q))));
         p.showDialog((DialogLike) this.dialog("&5Етапи: " + q.name,
             List.of(this.para("Етапи проходяться по черзі. Зміна порядку чи видалення етапу зсуває прогрес гравців, які вже проходять цей квест.")),
             List.of(),
@@ -2139,6 +2234,41 @@ TabExecutor {
                         p.sendMessage(this.text("&eУвага: NPC #" + sg.npc + " не існує."));
                     }
                 }
+                case "break", "harvest", "honey", "breed", "craft", "trade" -> {
+                    if (!sg.type.equals("honey")) {
+                        String tg = QuestNPC.clean(v.apply("targets"), "");
+                        String bad = this.invalidTargets(sg.type, tg);
+                        if (bad != null) {
+                            if (sg.type.equals("breed")) {
+                                p.sendMessage(this.text("&cНевідомий тип істоти: &f" + bad + "&c. Спробуй англійську назву, напр. COW."));
+                            } else {
+                                this.suggestItems(p, bad.startsWith("#") ? bad.substring(1) : bad);
+                            }
+                            return false;
+                        }
+                        sg.targets = tg;
+                        sg.matCache = null;
+                    }
+                    sg.amount = Math.max(1, Integer.parseInt(QuestNPC.clean(v.apply("amount"), "1")));
+                    if (sg.zone) {
+                        String zw = QuestNPC.clean(v.apply("world"), sg.world);
+                        if (Bukkit.getWorld(zw) == null) {
+                            p.sendMessage(this.text("&cСвіт \"" + zw + "\" не знайдено."));
+                            return false;
+                        }
+                        double zx = Double.parseDouble(QuestNPC.clean(v.apply("x"), "0").replace(',', '.'));
+                        double zy = Double.parseDouble(QuestNPC.clean(v.apply("y"), "64").replace(',', '.'));
+                        double zz = Double.parseDouble(QuestNPC.clean(v.apply("z"), "0").replace(',', '.'));
+                        double zr = Math.max(1.0, Double.parseDouble(QuestNPC.clean(v.apply("radius"), "5").replace(',', '.')));
+                        String zh = QuestNPC.clean(v.apply("height"), "");
+                        sg.world = zw;
+                        sg.x = zx;
+                        sg.y = zy;
+                        sg.z = zz;
+                        sg.radius = zr;
+                        sg.height = zh.isEmpty() ? -1.0 : Math.max(0.0, Double.parseDouble(zh.replace(',', '.')));
+                    }
+                }
                 case "mob" -> {
                     String mworld = QuestNPC.clean(v.apply("world"), sg.world);
                     if (Bukkit.getWorld(mworld) == null) {
@@ -2166,6 +2296,16 @@ TabExecutor {
                     sg.mobName = mname;
                     sg.entity = mtype;
                 }
+                case "pool" -> {
+                    sg.npc = Integer.parseInt(QuestNPC.clean(v.apply("npc"), "-1"));
+                    if (sg.npc < 0) {
+                        p.sendMessage(this.text("&cДля набору предметів вкажи № NPC, якому їх віддавати."));
+                        return false;
+                    }
+                    if (!this.npcs.containsKey(sg.npc)) {
+                        p.sendMessage(this.text("&eУвага: NPC #" + sg.npc + " не існує."));
+                    }
+                }
                 case "item" -> {
                     sg.amount = Math.max(1, Integer.parseInt(QuestNPC.clean(v.apply("amount"), "1")));
                     sg.npc = Integer.parseInt(QuestNPC.clean(v.apply("npc"), "-1"));
@@ -2183,7 +2323,7 @@ TabExecutor {
             }
             sg.chat = QuestNPC.clean(v.apply("chat"), "");
             sg.chatNpc = Integer.parseInt(QuestNPC.clean(v.apply("chatnpc"), "-1"));
-            if (sg.type.equals("deliver") || sg.type.equals("item") || sg.type.equals("talk")) {
+            if (sg.type.equals("deliver") || sg.type.equals("item") || sg.type.equals("pool") || sg.type.equals("talk")) {
                 sg.reply = QuestNPC.clean(v.apply("reply"), "");
                 sg.replyFail = QuestNPC.clean(v.apply("replyfail"), "");
             }
@@ -2218,6 +2358,20 @@ TabExecutor {
                 inputs.add(this.line("amount", "Кількість", String.valueOf(sg.amount), 5));
                 inputs.add(this.line("npc", "№ NPC, якому віддати (-1 = забрати з інвентаря автоматично)", String.valueOf(sg.npc), 5));
             }
+            case "break", "harvest", "honey", "breed", "craft", "trade" -> {
+                if (!sg.type.equals("honey")) {
+                    inputs.add(this.line("targets", QuestNPC.targetsHint(sg.type), sg.targets, 200));
+                }
+                inputs.add(this.line("amount", "Кількість", String.valueOf(sg.amount), 5));
+                if (sg.zone) {
+                    inputs.add(this.line("world", "Світ зони", sg.world, 40));
+                    inputs.add(this.line("x", "X (центр зони)", QuestNPC.num(sg.x), 12));
+                    inputs.add(this.line("y", "Y", QuestNPC.num(sg.y), 12));
+                    inputs.add(this.line("z", "Z", QuestNPC.num(sg.z), 12));
+                    inputs.add(this.line("radius", "Радіус зони", QuestNPC.num(sg.radius), 8));
+                    inputs.add(this.line("height", "Допуск по висоті (порожньо = без обмеження)", sg.height < 0.0 ? "" : QuestNPC.num(sg.height), 8));
+                }
+            }
             case "mob" -> {
                 inputs.add(this.line("world", "Світ", sg.world, 40));
                 inputs.add(this.line("x", "X (центр зони)", QuestNPC.num(sg.x), 12));
@@ -2228,6 +2382,9 @@ TabExecutor {
                 inputs.add(this.line("mobname", "Назва моба на бирці (як на name tag, без кольорів)", sg.mobName, 60));
                 inputs.add(this.line("entity", "Тип моба (необов'язково, напр. COW; порожньо = будь-який)", sg.entity == null ? "" : sg.entity.name(), 40));
             }
+            case "pool" -> {
+                inputs.add(this.line("npc", "№ NPC, якому віддавати набір (обов'язково)", String.valueOf(sg.npc), 5));
+            }
             case "item" -> {
                 inputs.add(this.line("amount", "Кількість", String.valueOf(sg.amount), 5));
                 inputs.add(this.line("npc", "№ NPC, якому віддати (-1 = забрати з інвентаря автоматично)", String.valueOf(sg.npc), 5));
@@ -2235,7 +2392,7 @@ TabExecutor {
             case "talk" -> inputs.add(this.line("npc", "№ NPC, з яким поговорити", String.valueOf(sg.npc), 5));
             default -> { }
         }
-        if (sg.type.equals("deliver") || sg.type.equals("item") || sg.type.equals("talk")) {
+        if (sg.type.equals("deliver") || sg.type.equals("item") || sg.type.equals("pool") || sg.type.equals("talk")) {
             inputs.add(this.block("reply", "Відповідь NPC після виконання (порожньо = звичайне меню)", sg.reply, 300));
             if (!sg.type.equals("talk")) {
                 inputs.add(this.block("replyfail", "Відповідь NPC, якщо предмета немає (порожньо = лише повідомлення в чаті)", sg.replyFail, 300));
@@ -2251,7 +2408,7 @@ TabExecutor {
             }
             this.openStageEditor(p, q, idx);
         })));
-        if (sg.type.equals("reach") || sg.type.equals("mob")) {
+        if (sg.type.equals("reach") || sg.type.equals("mob") || QuestNPC.isAction(sg.type) && sg.zone) {
             buttons.add(this.btn("Взяти мою позицію", v -> this.sync(() -> {
                 this.applyStage(p, sg, v);
                 this.fillHere(sg, p);
@@ -2279,6 +2436,32 @@ TabExecutor {
                 } else {
                     sg.npc = best.id;
                     p.sendMessage(this.text("&aОбрано NPC №" + best.id + ": &f" + best.name));
+                }
+                this.saveQuests();
+                this.openStageEditor(p, q, idx);
+            })));
+        }
+        if (sg.type.equals("pool")) {
+            buttons.add(this.btn("&dНабір предметів: " + sg.pool.size() + " (скриня)", v -> this.sync(() -> {
+                this.applyStage(p, sg, v);
+                this.saveQuests();
+                this.openPoolChest(p, q, sg);
+            })));
+            buttons.add(this.btn("&dКількості предметів набору", v -> this.sync(() -> {
+                this.applyStage(p, sg, v);
+                this.saveQuests();
+                this.openPoolAmounts(p, q, sg);
+            })));
+        }
+        if (QuestNPC.isAction(sg.type)) {
+            buttons.add(this.btn("Обмежити зоною: " + (sg.zone ? "&aтак" : "&cні"), v -> this.sync(() -> {
+                this.applyStage(p, sg, v);
+                sg.zone = !sg.zone;
+                if (sg.zone && (sg.world == null || sg.world.isBlank())) {
+                    this.fillHere(sg, p);
+                    if (sg.radius <= 0.0) {
+                        sg.radius = 10.0;
+                    }
                 }
                 this.saveQuests();
                 this.openStageEditor(p, q, idx);
@@ -2590,6 +2773,15 @@ TabExecutor {
                 this.openQuestDetail(p, n, q);
             })));
         }
+        if (st != null && "ACTIVE".equals(st.status) && st.stage < q.stages.size()) {
+            Stage curStage = q.stages.get(st.stage);
+            if (curStage.type.equals("pool")) {
+                body.add(DialogBody.plainMessage(this.poolChecklist(curStage, st, null)));
+                if (curStage.npc == n.id) {
+                    buttons.add(this.btn("&aВіддати предмети (набір)", v -> this.sync(() -> this.openPoolHandIn(p, n, q))));
+                }
+            }
+        }
         ActionButton back = this.btn(fresh && lock == null ? "&cВідхилити" : "&7Назад", v -> this.sync(() -> {
             if (fresh && lock == null && !q.declineReply.isBlank()) {
                 this.openReply(p, n, q.declineReply);
@@ -2865,8 +3057,17 @@ TabExecutor {
         if (st.stage < q.stages.size()) {
             Stage sg = q.stages.get(st.stage);
             int need = Math.max(1, sg.amount);
-            if (sg.type.equals("kill")) {
+            if (sg.type.equals("kill") || QuestNPC.isAction(sg.type)) {
                 part = Math.min(1.0, st.count / (double) need);
+            } else if (sg.type.equals("pool") && !sg.pool.isEmpty()) {
+                long needAll = 0L;
+                long gotAll = 0L;
+                for (int i = 0; i < sg.pool.size(); i++) {
+                    long a0 = sg.pool.get(i).amount;
+                    needAll += a0;
+                    gotAll += Math.min(a0, st.pool != null && i < st.pool.length ? st.pool[i] : 0L);
+                }
+                part = needAll > 0L ? gotAll / (double) needAll : 0.0;
             } else if (sg.type.equals("deliver") && sg.material != null) {
                 Material mat = sg.material;
                 part = Math.min(1.0, this.countStack(p, it -> it.getType() == mat) / (double) need);
@@ -2930,52 +3131,6 @@ TabExecutor {
         }
     }
 
-    private void openJournal(Player p) {
-        List<DialogBody> body = new ArrayList<>();
-        List<ActionButton> buttons = new ArrayList<>();
-        UUID id = p.getUniqueId();
-        Map<String, QState> m = this.progress.get(id);
-        Quest tq = this.trackedQuest(p);
-        if (m != null) {
-            for (Map.Entry<String, QState> en : m.entrySet()) {
-                QState st = en.getValue();
-                Quest q = this.quests.get(en.getKey());
-                if (q == null || "DONE".equals(st.status)) {
-                    continue;
-                }
-                String desc = q.description.isBlank() ? "" : "\n&7" + q.description;
-                body.add(DialogBody.plainMessage(LEGACY.deserialize((q == tq ? "&e★ " : "") + "&6&l" + q.name + desc + "\n").append(this.describeC(p, q, st))));
-                if (q != tq) {
-                    buttons.add(this.btn("&eВідстежувати: " + q.name, v -> this.sync(() -> {
-                        this.tracked.put(id, q.id);
-                        this.progressDirty = true;
-                        this.updateTracker(p);
-                        this.openJournal(p);
-                    })));
-                }
-                if (this.getConfig().getBoolean("quest.allow-cancel", true)) {
-                    buttons.add(this.btn("&cСкасувати: " + q.name, v -> this.sync(() -> this.openCancelConfirm(p, q))));
-                }
-            }
-        }
-        if (body.isEmpty()) {
-            body.add(this.para("&7Активних квестів немає. Поговори з жителями, щоб отримати завдання."));
-        }
-        if (!this.lines.isEmpty()) {
-            buttons.add(this.btn("&bЛінійки квестів", v -> this.sync(() -> this.openLines(p))));
-        }
-        buttons.add(this.btn("Панель квестів зверху: " + (this.hudOff.contains(id) ? "&cвимкнена" : "&aувімкнена"), v -> this.sync(() -> {
-            if (!this.hudOff.remove(id)) {
-                this.hudOff.add(id);
-            }
-            this.progressDirty = true;
-            this.updateTracker(p);
-            this.openJournal(p);
-        })));
-        p.showDialog((DialogLike) this.dialog("&6Журнал квестів", body, List.of(),
-            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Закрити", null), (int) 1)));
-    }
-
     // ======================= v0.5.2: АВТОЗБІР ПРЕДМЕТІВ, ГАРНИЙ ОПИС ЕТАПУ =======================
 
     private Component npcSuffix(int id) {
@@ -3020,6 +3175,19 @@ TabExecutor {
         }
         if (sg.type.equals("talk")) {
             return out.append(this.npcSuffix(sg.npc));
+        }
+        if (sg.type.equals("pool")) {
+            int totalItems = sg.pool.size();
+            int complete = 0;
+            for (int i = 0; i < totalItems; i++) {
+                if (st.pool != null && i < st.pool.length && st.pool[i] >= sg.pool.get(i).amount) {
+                    complete++;
+                }
+            }
+            return out.append(LEGACY.deserialize(" &7(" + complete + "/" + totalItems + " пунктів)")).append(this.npcSuffix(sg.npc));
+        }
+        if (QuestNPC.isAction(sg.type)) {
+            return out.append(LEGACY.deserialize(" &7(" + st.count + "/" + Math.max(1, sg.amount) + ")"));
         }
         if (sg.type.equals("mob")) {
             String near = "";
@@ -3603,6 +3771,16 @@ TabExecutor {
             s1.reply = s0.reply;
             s1.replyFail = s0.replyFail;
             s1.mobName = s0.mobName;
+            s1.targets = s0.targets;
+            for (PoolItem pit : s0.pool) {
+                PoolItem cp = new PoolItem();
+                cp.material = pit.material;
+                cp.stack = pit.stack;
+                cp.exact = pit.exact;
+                cp.amount = pit.amount;
+                s1.pool.add(cp);
+            }
+            s1.zone = s0.zone;
             s1.chat = s0.chat;
             s1.chatNpc = s0.chatNpc;
             c.stages.add(s1);
@@ -4375,6 +4553,1086 @@ TabExecutor {
             (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openChatterList(p))), (int) 1)));
     }
 
+    // ======================= v0.8.0: ЕТАПИ-ДІЇ (блоки, урожай, мед, розведення, крафт, торгівля) =======================
+
+    private static final String[][] STAGE_CATS = {
+        {"Рух і зони", "reach", "mob"},
+        {"Бій", "kill"},
+        {"Добування", "break", "harvest", "honey"},
+        {"Створення", "craft"},
+        {"Тварини", "breed"},
+        {"Торгівля", "trade"},
+        {"Предмети", "deliver", "item", "pool"},
+        {"Розмови", "talk"}
+    };
+
+    private final Map<java.util.UUID, Map<Long, Boolean>> placedBlocks = new HashMap<>();
+    private final Map<java.util.UUID, Long> lastHoney = new HashMap<>();
+    private final Map<java.util.UUID, long[]> tradeStamp = new HashMap<>();
+    private boolean tradeWarned = false;
+
+    private static boolean isAction(String t) {
+        return t.equals("break") || t.equals("harvest") || t.equals("honey") || t.equals("breed") || t.equals("craft") || t.equals("trade");
+    }
+
+    private static String targetsHint(String type) {
+        return switch (type) {
+            case "break" -> "Які блоки (через кому: STONE, #logs; порожньо = будь-які)";
+            case "harvest" -> "Яка культура (WHEAT, CARROTS, POTATOES...; порожньо = будь-яка)";
+            case "breed" -> "Яких тварин (COW, SHEEP...; порожньо = будь-яких)";
+            case "craft" -> "Що скрафтити (DIAMOND_SWORD, #planks; порожньо = будь-що)";
+            case "trade" -> "Що отримати в угоді (DIAMOND, #logs; порожньо = будь-яка угода)";
+            default -> "Ціль";
+        };
+    }
+
+    // ---- цілі: матеріали, теги (#logs), типи істот ----
+
+    private java.util.Set<Material> targetMaterials(Stage sg) {
+        if (sg.matCache != null) {
+            return sg.matCache;
+        }
+        java.util.Set<Material> out = new java.util.HashSet<>();
+        for (String raw : sg.targets.split(",")) {
+            String t = raw.trim();
+            if (t.isEmpty()) {
+                continue;
+            }
+            if (t.startsWith("#")) {
+                org.bukkit.NamespacedKey key = org.bukkit.NamespacedKey.minecraft(t.substring(1).toLowerCase(Locale.ROOT));
+                org.bukkit.Tag<Material> bt = Bukkit.getTag(org.bukkit.Tag.REGISTRY_BLOCKS, key, Material.class);
+                if (bt != null) {
+                    out.addAll(bt.getValues());
+                }
+                org.bukkit.Tag<Material> itg = Bukkit.getTag(org.bukkit.Tag.REGISTRY_ITEMS, key, Material.class);
+                if (itg != null) {
+                    out.addAll(itg.getValues());
+                }
+            } else {
+                Material m = Material.matchMaterial(t);
+                if (m != null) {
+                    out.add(m);
+                }
+            }
+        }
+        sg.matCache = out;
+        return out;
+    }
+
+    private boolean matchMat(Stage sg, Material m) {
+        if (sg.targets == null || sg.targets.isBlank()) {
+            return true;
+        }
+        return this.targetMaterials(sg).contains(m);
+    }
+
+    private boolean matchEntity(Stage sg, EntityType t) {
+        if (sg.targets == null || sg.targets.isBlank()) {
+            return true;
+        }
+        for (String raw : sg.targets.split(",")) {
+            if (raw.trim().equalsIgnoreCase(t.name())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Перший невідомий елемент у списку цілей або null, якщо все правильно. */
+    private String invalidTargets(String type, String targets) {
+        for (String raw : targets.split(",")) {
+            String t = raw.trim();
+            if (t.isEmpty()) {
+                continue;
+            }
+            if (type.equals("breed")) {
+                try {
+                    EntityType.valueOf(t.toUpperCase(Locale.ROOT));
+                } catch (IllegalArgumentException ex) {
+                    return t;
+                }
+            } else if (t.startsWith("#")) {
+                org.bukkit.NamespacedKey key = org.bukkit.NamespacedKey.minecraft(t.substring(1).toLowerCase(Locale.ROOT));
+                if (Bukkit.getTag(org.bukkit.Tag.REGISTRY_BLOCKS, key, Material.class) == null
+                    && Bukkit.getTag(org.bukkit.Tag.REGISTRY_ITEMS, key, Material.class) == null) {
+                    return t;
+                }
+            } else if (Material.matchMaterial(t) == null) {
+                return t;
+            }
+        }
+        return null;
+    }
+
+    private boolean actionZoneOk(Stage sg, Location loc) {
+        if (!sg.zone) {
+            return true;
+        }
+        if (loc == null || loc.getWorld() == null || sg.world == null || !loc.getWorld().getName().equals(sg.world)) {
+            return false;
+        }
+        double dx = loc.getX() - sg.x;
+        double dz = loc.getZ() - sg.z;
+        if (dx * dx + dz * dz > sg.radius * sg.radius) {
+            return false;
+        }
+        return sg.height < 0.0 || Math.abs(loc.getY() - sg.y) <= sg.height;
+    }
+
+    private boolean hasStage(Player p, String type) {
+        Map<String, QState> m = this.progress.get(p.getUniqueId());
+        if (m == null) {
+            return false;
+        }
+        for (Map.Entry<String, QState> en : m.entrySet()) {
+            QState st = en.getValue();
+            Quest q = this.quests.get(en.getKey());
+            if (q != null && "ACTIVE".equals(st.status) && st.stage < q.stages.size() && q.stages.get(st.stage).type.equals(type)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean countsFor(Player p) {
+        return p.getGameMode() != org.bukkit.GameMode.CREATIVE || this.getConfig().getBoolean("actions.count-creative", false);
+    }
+
+    /** Додає прогрес усім активним етапам цього типу, що підходять під умову. */
+    private void actionProgress(Player p, String type, int n, java.util.function.Predicate<Stage> ok) {
+        Map<String, QState> m = this.progress.get(p.getUniqueId());
+        if (m == null || n <= 0) {
+            return;
+        }
+        for (Map.Entry<String, QState> en : new ArrayList<Map.Entry<String, QState>>(m.entrySet())) {
+            QState st = en.getValue();
+            Quest q = this.quests.get(en.getKey());
+            if (q == null || !"ACTIVE".equals(st.status) || st.stage >= q.stages.size()) {
+                continue;
+            }
+            Stage sg = q.stages.get(st.stage);
+            if (!sg.type.equals(type) || !ok.test(sg)) {
+                continue;
+            }
+            st.count += n;
+            this.progressDirty = true;
+            if (st.count >= Math.max(1, sg.amount)) {
+                this.advance(p, q, st);
+            } else {
+                p.sendActionBar(this.text("&6" + q.name + " &8» &f" + st.count + "/" + sg.amount));
+            }
+        }
+    }
+
+    // ---- блоки, поставлені гравцями, не зараховуються ----
+
+    private Map<Long, Boolean> placedIn(org.bukkit.World w) {
+        return this.placedBlocks.computeIfAbsent(w.getUID(), k -> {
+            final int cap = Math.max(1000, this.getConfig().getInt("actions.placed-memory", 100000));
+            return new java.util.LinkedHashMap<Long, Boolean>(1024, 0.75f, false) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<Long, Boolean> eldest) {
+                    return this.size() > cap;
+                }
+            };
+        });
+    }
+
+    private boolean isMatureCrop(org.bukkit.block.Block b) {
+        Material t = b.getType();
+        if (t == Material.MELON || t == Material.PUMPKIN) {
+            return true;
+        }
+        if (!(org.bukkit.Tag.CROPS.isTagged(t) || t == Material.NETHER_WART || t == Material.COCOA || t == Material.SWEET_BERRY_BUSH)) {
+            return false;
+        }
+        return b.getBlockData() instanceof org.bukkit.block.data.Ageable a && a.getAge() >= a.getMaximumAge();
+    }
+
+    @EventHandler(priority = org.bukkit.event.EventPriority.MONITOR, ignoreCancelled = true)
+    public void onActPlace(org.bukkit.event.block.BlockPlaceEvent e) {
+        org.bukkit.block.Block b = e.getBlockPlaced();
+        this.placedIn(b.getWorld()).put(b.getBlockKey(), Boolean.TRUE);
+    }
+
+    @EventHandler(priority = org.bukkit.event.EventPriority.MONITOR, ignoreCancelled = true)
+    public void onActBreak(org.bukkit.event.block.BlockBreakEvent e) {
+        Player p = e.getPlayer();
+        org.bukkit.block.Block b = e.getBlock();
+        boolean wasPlaced = this.placedIn(b.getWorld()).remove(b.getBlockKey()) != null;
+        if (!this.countsFor(p)) {
+            return;
+        }
+        boolean wantBreak = this.hasStage(p, "break");
+        boolean wantHarvest = this.hasStage(p, "harvest");
+        if (!wantBreak && !wantHarvest) {
+            return;
+        }
+        Material type = b.getType();
+        Location loc = b.getLocation();
+        if (wantBreak && !wasPlaced) {
+            this.actionProgress(p, "break", 1, sg -> this.matchMat(sg, type) && this.actionZoneOk(sg, loc));
+        }
+        boolean fruit = type == Material.MELON || type == Material.PUMPKIN;
+        if (wantHarvest && this.isMatureCrop(b) && !(fruit && wasPlaced)) {
+            this.actionProgress(p, "harvest", 1, sg -> this.matchMat(sg, type) && this.actionZoneOk(sg, loc));
+        }
+    }
+
+    @EventHandler(priority = org.bukkit.event.EventPriority.MONITOR, ignoreCancelled = true)
+    public void onActHarvest(org.bukkit.event.player.PlayerHarvestBlockEvent e) {
+        Player p = e.getPlayer();
+        if (!this.countsFor(p) || !this.hasStage(p, "harvest")) {
+            return;
+        }
+        Material type = e.getHarvestedBlock().getType();
+        Location loc = e.getHarvestedBlock().getLocation();
+        this.actionProgress(p, "harvest", 1, sg -> this.matchMat(sg, type) && this.actionZoneOk(sg, loc));
+    }
+
+    @EventHandler(priority = org.bukkit.event.EventPriority.MONITOR, ignoreCancelled = true)
+    public void onActHoney(PlayerInteractEvent e) {
+        if (e.getAction() != Action.RIGHT_CLICK_BLOCK || e.getClickedBlock() == null || e.getItem() == null) {
+            return;
+        }
+        Material bt = e.getClickedBlock().getType();
+        if (bt != Material.BEEHIVE && bt != Material.BEE_NEST) {
+            return;
+        }
+        Material tool = e.getItem().getType();
+        if (tool != Material.GLASS_BOTTLE && tool != Material.SHEARS) {
+            return;
+        }
+        Player p = e.getPlayer();
+        if (!this.countsFor(p) || !this.hasStage(p, "honey")) {
+            return;
+        }
+        if (!(e.getClickedBlock().getBlockData() instanceof org.bukkit.block.data.type.Beehive hive) || hive.getHoneyLevel() < hive.getMaximumHoneyLevel()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        Long last = this.lastHoney.get(p.getUniqueId());
+        if (last != null && now - last < 400L) {
+            return;
+        }
+        this.lastHoney.put(p.getUniqueId(), now);
+        Location loc = e.getClickedBlock().getLocation();
+        this.actionProgress(p, "honey", 1, sg -> this.actionZoneOk(sg, loc));
+    }
+
+    @EventHandler(priority = org.bukkit.event.EventPriority.MONITOR, ignoreCancelled = true)
+    public void onActBreed(org.bukkit.event.entity.EntityBreedEvent e) {
+        if (!(e.getBreeder() instanceof Player p)) {
+            return;
+        }
+        if (!this.countsFor(p) || !this.hasStage(p, "breed")) {
+            return;
+        }
+        EntityType t = e.getEntityType();
+        Location loc = e.getEntity().getLocation();
+        this.actionProgress(p, "breed", 1, sg -> this.matchEntity(sg, t) && this.actionZoneOk(sg, loc));
+    }
+
+    private int craftedAmount(org.bukkit.event.inventory.CraftItemEvent e, Player p) {
+        ItemStack res = e.getRecipe().getResult();
+        int per = Math.max(1, res.getAmount());
+        if (!e.isShiftClick()) {
+            return per;
+        }
+        int times = Integer.MAX_VALUE;
+        for (ItemStack it : e.getInventory().getMatrix()) {
+            if (it != null && !it.getType().isAir()) {
+                times = Math.min(times, it.getAmount());
+            }
+        }
+        if (times == Integer.MAX_VALUE) {
+            return per;
+        }
+        int free = 0;
+        for (ItemStack s : p.getInventory().getStorageContents()) {
+            if (s == null || s.getType().isAir()) {
+                free += res.getMaxStackSize();
+            } else if (s.isSimilar(res)) {
+                free += Math.max(0, s.getMaxStackSize() - s.getAmount());
+            }
+        }
+        return Math.max(per, Math.min(times * per, free));
+    }
+
+    @EventHandler(priority = org.bukkit.event.EventPriority.MONITOR, ignoreCancelled = true)
+    public void onActCraft(org.bukkit.event.inventory.CraftItemEvent e) {
+        if (!(e.getWhoClicked() instanceof Player p)) {
+            return;
+        }
+        if (!this.countsFor(p) || !this.hasStage(p, "craft")) {
+            return;
+        }
+        Material made = e.getRecipe().getResult().getType();
+        int n = this.craftedAmount(e, p);
+        Location loc = p.getLocation();
+        this.actionProgress(p, "craft", n, sg -> this.matchMat(sg, made) && this.actionZoneOk(sg, loc));
+    }
+
+    // ---- торгівля: Paper (жителі й віртуальні торговці, зокрема наші NPC) і Shopkeepers ----
+
+    private void hookTradeEvents() {
+        this.hookEvent("io.papermc.paper.event.player.PlayerPurchaseEvent", true);
+        String[] shop = {"com.nisovin.shopkeepers.api.events.ShopkeeperTradeCompletedEvent", "com.nisovin.shopkeepers.api.events.ShopkeeperTradeEvent"};
+        for (String c : shop) {
+            if (this.hookEvent(c, false)) {
+                break;
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean hookEvent(String className, boolean vanilla) {
+        try {
+            Class<?> raw = Class.forName(className);
+            if (!org.bukkit.event.Event.class.isAssignableFrom(raw)) {
+                return false;
+            }
+            final Class<? extends org.bukkit.event.Event> cls = (Class<? extends org.bukkit.event.Event>) raw;
+            org.bukkit.plugin.EventExecutor exec = (l, ev) -> {
+                if (cls.isInstance(ev)) {
+                    this.onTradeEvent(ev, vanilla);
+                }
+            };
+            Bukkit.getPluginManager().registerEvent(cls, this, org.bukkit.event.EventPriority.MONITOR, exec, (Plugin) this, true);
+            this.getLogger().info("Підключено подію торгівлі: " + className);
+            return true;
+        } catch (ClassNotFoundException | LinkageError ex) {
+            return false;
+        } catch (RuntimeException ex) {
+            this.getLogger().warning("Не вдалося підключити " + className + ": " + ex.getMessage());
+            return false;
+        }
+    }
+
+    private void onTradeEvent(org.bukkit.event.Event ev, boolean vanilla) {
+        try {
+            Object po = ev.getClass().getMethod("getPlayer").invoke(ev);
+            if (!(po instanceof Player p) || !this.countsFor(p) || !this.hasStage(p, "trade")) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            long[] ts = this.tradeStamp.computeIfAbsent(p.getUniqueId(), k -> new long[2]);
+            int mine = vanilla ? 0 : 1;
+            boolean dup = now - ts[1 - mine] < 120L;
+            ts[mine] = now;
+            if (dup) {
+                return;
+            }
+            Material result = null;
+            if (vanilla) {
+                Object recipe = ev.getClass().getMethod("getTrade").invoke(ev);
+                if (recipe instanceof org.bukkit.inventory.MerchantRecipe mr) {
+                    result = mr.getResult().getType();
+                }
+            }
+            final Material res = result;
+            Location loc = p.getLocation();
+            this.actionProgress(p, "trade", 1, sg -> (res == null || this.matchMat(sg, res)) && this.actionZoneOk(sg, loc));
+        } catch (ReflectiveOperationException | RuntimeException ex) {
+            if (!this.tradeWarned) {
+                this.tradeWarned = true;
+                this.getLogger().warning("Не вдалося обробити подію торгівлі: " + ex);
+            }
+        }
+    }
+
+    // ---- додавання етапу за розділами ----
+
+    private void addStageOfType(Player p, Quest q, String t) {
+        Stage sg = new Stage();
+        sg.type = t;
+        sg.text = QuestNPC.stageLabel(t);
+        if (t.equals("reach") || t.equals("mob")) {
+            this.fillHere(sg, p);
+        } else if (t.equals("kill")) {
+            sg.entity = EntityType.ZOMBIE;
+        } else if (t.equals("deliver")) {
+            sg.material = Material.STONE;
+        } else if (t.equals("item")) {
+            ItemStack held = p.getInventory().getItemInOffHand();
+            if (held.getType().isAir()) {
+                p.sendMessage(this.text("&cПоклади в ліву руку (клавіша F міняє руки) предмет, який треба принести NPC, і натисни ще раз."));
+                this.openStageTypes(p, q, QuestNPC.STAGE_CATS[6]);
+                return;
+            }
+            sg.stack = this.encode(held.clone());
+            sg.amount = held.getAmount();
+            sg.material = held.getType();
+        } else if (QuestNPC.isAction(t)) {
+            sg.amount = t.equals("honey") || t.equals("trade") ? 3 : 10;
+        }
+        q.stages.add(sg);
+        this.saveQuests();
+        if (t.equals("pool")) {
+            this.openPoolChest(p, q, sg);
+        } else {
+            this.openStageEditor(p, q, q.stages.size() - 1);
+        }
+    }
+
+    private void openStageCategories(Player p, Quest q) {
+        List<ActionButton> buttons = new ArrayList<>();
+        for (String[] cat : QuestNPC.STAGE_CATS) {
+            buttons.add(this.btn("&b" + cat[0] + " &8(" + (cat.length - 1) + ")", v -> this.sync(() -> this.openStageTypes(p, q, cat))));
+        }
+        p.showDialog((DialogLike) this.dialog("&5Новий етап: розділ",
+            List.of(this.para("Обери розділ, потім тип етапу.")), List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openStages(p, q))), (int) 1)));
+    }
+
+    private void openStageTypes(Player p, Quest q, String[] cat) {
+        List<ActionButton> buttons = new ArrayList<>();
+        for (int i = 1; i < cat.length; i++) {
+            final String t = cat[i];
+            buttons.add(this.btn("&a+ " + QuestNPC.stageLabel(t), v -> this.sync(() -> this.addStageOfType(p, q, t))));
+        }
+        p.showDialog((DialogLike) this.dialog("&5Новий етап: " + cat[0],
+            List.of(this.para("Обери тип етапу.")), List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openStageCategories(p, q))), (int) 1)));
+    }
+
+    // ======================= v0.8.0 (доповнення): НАБІР ПРЕДМЕТІВ, АРКУШ «СПИСОК ЗАВДАНЬ», ДЕТАЛІ КВЕСТУ =======================
+
+    static final class PoolItem {
+        Material material;
+        String stack = "";
+        boolean exact;
+        long amount = 1L;
+
+        PoolItem() {
+        }
+    }
+
+    static final class PoolChest
+    implements InventoryHolder {
+        final Quest q;
+        final Stage sg;
+        Inventory inv;
+
+        PoolChest(Quest q, Stage sg) {
+            this.q = q;
+            this.sg = sg;
+        }
+
+        public Inventory getInventory() {
+            return this.inv;
+        }
+    }
+
+    static final class PoolScan {
+        long[] have;
+        List<Component> details = new ArrayList<>();
+
+        PoolScan() {
+        }
+    }
+
+    private ItemStack poolStack(PoolItem it) {
+        if (it.exact) {
+            try {
+                ItemStack s0 = this.stackOf(it.stack);
+                s0.setAmount(1);
+                return s0;
+            } catch (RuntimeException ex) {
+                // повертаємося до матеріалу
+            }
+        }
+        return new ItemStack(it.material == null ? Material.STONE : it.material);
+    }
+
+    private Component poolName(PoolItem it) {
+        if (it.exact) {
+            return this.itemName(this.poolStack(it));
+        }
+        return Component.translatable((it.material == null ? Material.STONE : it.material).translationKey());
+    }
+
+    private boolean sameAs(PoolItem pi, ItemStack sample, ItemStack s) {
+        if (s == null || s.getType().isAir()) {
+            return false;
+        }
+        return pi.exact ? s.isSimilar(sample) : s.getType() == pi.material;
+    }
+
+    /** Вміст шалкера чи рюкзака (копії предметів) або null, якщо це не контейнер. Порожні контейнери не розбираються. */
+    private List<ItemStack> contentsOf(ItemStack it) {
+        ItemMeta im = it.getItemMeta();
+        if (im == null) {
+            return null;
+        }
+        if (im instanceof org.bukkit.inventory.meta.BundleMeta bm) {
+            return bm.hasItems() ? bm.getItems() : new ArrayList<>();
+        }
+        if (im instanceof org.bukkit.inventory.meta.BlockStateMeta bsm && org.bukkit.Tag.SHULKER_BOXES.isTagged(it.getType())) {
+            List<ItemStack> out = new ArrayList<>();
+            if (bsm.hasBlockState() && bsm.getBlockState() instanceof org.bukkit.block.ShulkerBox sb) {
+                for (ItemStack c : sb.getInventory().getContents()) {
+                    if (c != null && !c.getType().isAir()) {
+                        out.add(c);
+                    }
+                }
+            }
+            return out;
+        }
+        return null;
+    }
+
+    /** Додає в acc кількість предметів набору в стаку (разом з вмістом контейнерів); повертає, скільки «інших» предметів усередині. */
+    private long scanStack(ItemStack it, List<PoolItem> pool, ItemStack[] samples, long[] acc, int depth) {
+        for (int i = 0; i < samples.length; i++) {
+            if (this.sameAs(pool.get(i), samples[i], it)) {
+                acc[i] += it.getAmount();
+                return 0L;
+            }
+        }
+        List<ItemStack> inside = depth < 3 ? this.contentsOf(it) : null;
+        if (inside == null) {
+            return it.getAmount();
+        }
+        long other = 0L;
+        for (ItemStack c : inside) {
+            other += this.scanStack(c, pool, samples, acc, depth + 1);
+        }
+        return other;
+    }
+
+    /** Одноразове сканування інвентаря. Викликається лише коли гравець сам відкриває вікно (жодних таймерів). */
+    private PoolScan scanPool(Player p, List<PoolItem> pool, boolean withDetails) {
+        PoolScan sc = new PoolScan();
+        int n = pool.size();
+        sc.have = new long[n];
+        ItemStack[] samples = new ItemStack[n];
+        for (int i = 0; i < n; i++) {
+            samples[i] = this.poolStack(pool.get(i));
+        }
+        int boxes = 0;
+        int bags = 0;
+        ItemStack[] all = p.getInventory().getContents();
+        for (int k = 0; k < all.length; k++) {
+            ItemStack it = all[k];
+            if (it == null || it.getType().isAir() || k >= 36 && k <= 39) {
+                continue;
+            }
+            if (withDetails && this.contentsOf(it) != null) {
+                boolean box = org.bukkit.Tag.SHULKER_BOXES.isTagged(it.getType());
+                long[] sub = new long[n];
+                long other = this.scanStack(it, pool, samples, sub, 0);
+                boolean any = other > 0L;
+                for (int i = 0; i < n; i++) {
+                    sc.have[i] += sub[i];
+                    any |= sub[i] > 0L;
+                }
+                int num = box ? ++boxes : ++bags;
+                if (any) {
+                    Component line = LEGACY.deserialize("&7" + (box ? "Шалкер " : "Рюкзак ") + num + ": ");
+                    boolean first = true;
+                    for (int i = 0; i < n; i++) {
+                        if (sub[i] > 0L) {
+                            line = line.append(LEGACY.deserialize(first ? "" : "&7, ")).append(this.poolName(pool.get(i)).colorIfAbsent(net.kyori.adventure.text.format.NamedTextColor.WHITE)).append(LEGACY.deserialize(" &7x" + sub[i]));
+                            first = false;
+                        }
+                    }
+                    if (other > 0L) {
+                        line = line.append(LEGACY.deserialize("&8 (зайвого всередині: " + other + ")"));
+                    }
+                    sc.details.add(line);
+                }
+            } else {
+                this.scanStack(it, pool, samples, sc.have, 0);
+            }
+        }
+        return sc;
+    }
+
+    private long takeFromList(List<ItemStack> list, PoolItem pi, ItemStack sample, long need, int depth) {
+        long taken = 0L;
+        java.util.ListIterator<ItemStack> iter = list.listIterator();
+        while (iter.hasNext() && taken < need) {
+            ItemStack c = iter.next();
+            if (c == null || c.getType().isAir()) {
+                continue;
+            }
+            if (this.sameAs(pi, sample, c)) {
+                long t = Math.min(need - taken, c.getAmount());
+                taken += t;
+                if (t >= c.getAmount()) {
+                    iter.remove();
+                } else {
+                    ItemStack r = c.clone();
+                    r.setAmount((int) (c.getAmount() - t));
+                    iter.set(r);
+                }
+            } else if (depth < 3 && this.contentsOf(c) != null) {
+                ItemStack cc = c.clone();
+                long t = this.takeInside(cc, pi, sample, need - taken, depth + 1);
+                if (t > 0L) {
+                    taken += t;
+                    iter.set(cc);
+                }
+            }
+        }
+        return taken;
+    }
+
+    /** Забирає з вмісту шалкера чи рюкзака (змінює переданий стак). Повертає, скільки забрано. */
+    private long takeInside(ItemStack container, PoolItem pi, ItemStack sample, long need, int depth) {
+        ItemMeta im = container.getItemMeta();
+        if (im instanceof org.bukkit.inventory.meta.BundleMeta bm) {
+            if (!bm.hasItems()) {
+                return 0L;
+            }
+            List<ItemStack> items = new ArrayList<>(bm.getItems());
+            long t = this.takeFromList(items, pi, sample, need, depth);
+            if (t > 0L) {
+                bm.setItems(items);
+                container.setItemMeta(bm);
+            }
+            return t;
+        }
+        if (im instanceof org.bukkit.inventory.meta.BlockStateMeta bsm && org.bukkit.Tag.SHULKER_BOXES.isTagged(container.getType())
+            && bsm.hasBlockState() && bsm.getBlockState() instanceof org.bukkit.block.ShulkerBox sb) {
+            Inventory si = sb.getInventory();
+            long taken = 0L;
+            for (int j = 0; j < si.getSize() && taken < need; j++) {
+                ItemStack c = si.getItem(j);
+                if (c == null || c.getType().isAir()) {
+                    continue;
+                }
+                if (this.sameAs(pi, sample, c)) {
+                    long t = Math.min(need - taken, c.getAmount());
+                    taken += t;
+                    if (t >= c.getAmount()) {
+                        si.setItem(j, null);
+                    } else {
+                        ItemStack r = c.clone();
+                        r.setAmount((int) (c.getAmount() - t));
+                        si.setItem(j, r);
+                    }
+                } else if (depth < 3 && this.contentsOf(c) != null) {
+                    ItemStack cc = c.clone();
+                    long t = this.takeInside(cc, pi, sample, need - taken, depth + 1);
+                    if (t > 0L) {
+                        taken += t;
+                        si.setItem(j, cc);
+                    }
+                }
+            }
+            if (taken > 0L) {
+                bsm.setBlockState(sb);
+                container.setItemMeta(bsm);
+            }
+            return taken;
+        }
+        return 0L;
+    }
+
+    /** Забирає до need предметів набору: спершу окремі, потім з шалкерів і рюкзаків. Контейнери лишаються гравцеві. */
+    private long takePool(Player p, PoolItem pi, long need) {
+        if (need <= 0L) {
+            return 0L;
+        }
+        ItemStack sample = this.poolStack(pi);
+        long left = need;
+        org.bukkit.inventory.PlayerInventory inv = p.getInventory();
+        ItemStack[] all = inv.getContents();
+        for (int k = 0; k < all.length && left > 0L; k++) {
+            ItemStack it = all[k];
+            if (it == null || it.getType().isAir() || k >= 36 && k <= 39 || !this.sameAs(pi, sample, it)) {
+                continue;
+            }
+            long t = Math.min(left, it.getAmount());
+            left -= t;
+            if (t >= it.getAmount()) {
+                inv.setItem(k, null);
+            } else {
+                ItemStack r = it.clone();
+                r.setAmount((int) (it.getAmount() - t));
+                inv.setItem(k, r);
+            }
+        }
+        for (int k = 0; k < all.length && left > 0L; k++) {
+            ItemStack it = all[k];
+            if (it == null || it.getType().isAir() || k >= 36 && k <= 39 || this.sameAs(pi, sample, it) || this.contentsOf(it) == null) {
+                continue;
+            }
+            ItemStack cc = it.clone();
+            long t = this.takeInside(cc, pi, sample, left, 0);
+            if (t > 0L) {
+                left -= t;
+                inv.setItem(k, cc);
+            }
+        }
+        return need - left;
+    }
+
+    private long[] poolProgress(QState st, Stage sg) {
+        if (st.pool == null || st.pool.length != sg.pool.size()) {
+            st.pool = new long[sg.pool.size()];
+        }
+        return st.pool;
+    }
+
+    private Component poolChecklist(Stage sg, QState st, long[] have) {
+        Component out = LEGACY.deserialize("&6Потрібно принести:");
+        for (int i = 0; i < sg.pool.size(); i++) {
+            PoolItem pi = sg.pool.get(i);
+            long done = st != null && st.pool != null && i < st.pool.length ? st.pool[i] : 0L;
+            boolean ok = done >= pi.amount;
+            Component line = Component.newline().append(LEGACY.deserialize(ok ? "&a✔ " : "&f○ "))
+                .append(this.poolName(pi).colorIfAbsent(net.kyori.adventure.text.format.NamedTextColor.WHITE))
+                .append(LEGACY.deserialize(" &7" + done + "/" + pi.amount));
+            if (have != null && !ok && have[i] > 0L) {
+                line = line.append(LEGACY.deserialize(" &8(у тебе: " + have[i] + ")"));
+            }
+            out = out.append(line);
+        }
+        return out;
+    }
+
+    private boolean poolComplete(Stage sg, QState st) {
+        for (int i = 0; i < sg.pool.size(); i++) {
+            long done = st.pool != null && i < st.pool.length ? st.pool[i] : 0L;
+            if (done < sg.pool.get(i).amount) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void openPoolHandIn(Player p, Npc n, Quest q) {
+        QState st = this.stateOf(p, q.id);
+        if (st == null || !"ACTIVE".equals(st.status) || st.stage >= q.stages.size() || !q.stages.get(st.stage).type.equals("pool")) {
+            this.openQuestDetail(p, n, q);
+            return;
+        }
+        Stage sg = q.stages.get(st.stage);
+        this.poolProgress(st, sg);
+        PoolScan sc = this.scanPool(p, sg.pool, false);
+        List<DialogBody> body = new ArrayList<>();
+        body.add(DialogBody.plainMessage(this.poolChecklist(sg, st, sc.have)));
+        body.add(this.para("&7Враховуються й предмети всередині шалкерів та рюкзаків. Самі шалкери й рюкзаки лишаються у вас."));
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(this.btn("&aВіддати все, що є", v -> this.sync(() -> this.giveAllPool(p, n, q))));
+        buttons.add(this.btn("&7Де що лежить (деталі)", v -> this.sync(() -> this.openPoolDetails(p, n, q))));
+        p.showDialog((DialogLike) this.dialog("&6Набір предметів",
+            body, List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openQuestDetail(p, n, q))), (int) 1)));
+    }
+
+    private void openPoolDetails(Player p, Npc n, Quest q) {
+        QState st = this.stateOf(p, q.id);
+        if (st == null || st.stage >= q.stages.size() || !q.stages.get(st.stage).type.equals("pool")) {
+            this.openQuestDetail(p, n, q);
+            return;
+        }
+        Stage sg = q.stages.get(st.stage);
+        PoolScan sc = this.scanPool(p, sg.pool, true);
+        Component all = LEGACY.deserialize("&6Шалкери й рюкзаки в інвентарі:");
+        if (sc.details.isEmpty()) {
+            all = all.append(Component.newline()).append(LEGACY.deserialize("&7Потрібних предметів у контейнерах немає."));
+        }
+        for (Component line : sc.details) {
+            all = all.append(Component.newline()).append(line);
+        }
+        List<DialogBody> body = new ArrayList<>();
+        body.add(DialogBody.plainMessage(all));
+        p.showDialog((DialogLike) this.dialog("&6Де що лежить", body, List.of(),
+            (DialogType) DialogType.notice((ActionButton) this.btn("&7Назад", v -> this.sync(() -> this.openPoolHandIn(p, n, q))))));
+    }
+
+    private void giveAllPool(Player p, Npc n, Quest q) {
+        QState st = this.stateOf(p, q.id);
+        if (st == null || !"ACTIVE".equals(st.status) || st.stage >= q.stages.size() || !q.stages.get(st.stage).type.equals("pool")) {
+            this.openQuestDetail(p, n, q);
+            return;
+        }
+        Stage sg = q.stages.get(st.stage);
+        long[] done = this.poolProgress(st, sg);
+        long total = 0L;
+        for (int i = 0; i < sg.pool.size(); i++) {
+            PoolItem pi = sg.pool.get(i);
+            long taken = this.takePool(p, pi, pi.amount - done[i]);
+            if (taken > 0L) {
+                done[i] += taken;
+                total += taken;
+                p.sendMessage(this.text("&7Віддано: &f" + taken + " x ").append(this.poolName(pi)));
+            }
+        }
+        if (total == 0L && !sg.pool.isEmpty()) {
+            p.sendMessage(this.text("&eУ вас немає потрібних предметів."));
+        }
+        this.progressDirty = true;
+        if (this.poolComplete(sg, st)) {
+            String reply = sg.reply;
+            this.advance(p, q, st);
+            if (!reply.isBlank()) {
+                this.openReply(p, n, reply);
+            } else {
+                this.openQuestDetail(p, n, q);
+            }
+        } else {
+            this.openPoolHandIn(p, n, q);
+        }
+    }
+
+    // ---- редактор набору: скриня й кількості ----
+
+    private void openPoolChest(Player p, Quest q, Stage sg) {
+        PoolChest holder = new PoolChest(q, sg);
+        Inventory inv = Bukkit.createInventory((InventoryHolder) holder, (int) 54, (Component) this.text("&5Набір предметів"));
+        holder.inv = inv;
+        for (int i = 0; i < sg.pool.size() && i < 54; i++) {
+            PoolItem pi = sg.pool.get(i);
+            ItemStack s0 = this.poolStack(pi);
+            s0.setAmount((int) Math.max(1L, Math.min(pi.amount, (long) s0.getMaxStackSize())));
+            inv.setItem(i, s0);
+        }
+        p.openInventory(inv);
+        p.sendMessage(this.text("&7Поклади сюди по одному предмету кожного виду, який треба принести. Предмети з назвою чи зачаруваннями вимагатимуться точно такими. Кількості (напр. 5st = 5 стаків, 3sh = 3 шалкери) задаси далі. Закрий вікно, щоб зберегти."));
+    }
+
+    private void savePoolChest(InventoryCloseEvent e, PoolChest pc) {
+        Map<String, PoolItem> merged = new LinkedHashMap<>();
+        for (ItemStack s0 : e.getInventory().getContents()) {
+            if (s0 == null || s0.getType().isAir()) {
+                continue;
+            }
+            boolean exact = s0.hasItemMeta();
+            ItemStack key = s0.clone();
+            key.setAmount(1);
+            String enc = exact ? this.encode(key) : "";
+            String k = exact ? "X" + enc : "M" + s0.getType().name();
+            PoolItem pi = merged.get(k);
+            if (pi == null) {
+                pi = new PoolItem();
+                pi.exact = exact;
+                pi.material = s0.getType();
+                pi.stack = enc;
+                pi.amount = 0L;
+                merged.put(k, pi);
+            }
+            pi.amount += s0.getAmount();
+        }
+        for (PoolItem old : pc.sg.pool) {
+            String k = old.exact ? "X" + old.stack : "M" + (old.material == null ? "" : old.material.name());
+            PoolItem now = merged.get(k);
+            if (now != null && old.amount > now.amount) {
+                now.amount = old.amount;
+            }
+        }
+        pc.sg.pool = new ArrayList<>(merged.values());
+        this.saveQuests();
+        HumanEntity he = e.getPlayer();
+        if (he instanceof Player pl) {
+            pl.sendMessage(this.text("&aНабір збережено: " + pc.sg.pool.size() + " пунктів. Тепер задай кількості."));
+            Bukkit.getScheduler().runTask((Plugin) this, () -> {
+                if (pl.isOnline()) {
+                    this.openPoolAmounts(pl, pc.q, pc.sg);
+                }
+            });
+        }
+    }
+
+    /** Кількість: число, або 5st (5 стаків), або 3sh (3 шалкери = 3 x 27 стаків). */
+    private static long parseQty(String raw, int stackSize) {
+        if (raw == null) {
+            return -1L;
+        }
+        String t = raw.trim().toLowerCase(Locale.ROOT).replace(" ", "");
+        long mult = 1L;
+        if (t.endsWith("sh")) {
+            mult = 27L * stackSize;
+            t = t.substring(0, t.length() - 2);
+        } else if (t.endsWith("ш")) {
+            mult = 27L * stackSize;
+            t = t.substring(0, t.length() - 1);
+        } else if (t.endsWith("st")) {
+            mult = stackSize;
+            t = t.substring(0, t.length() - 2);
+        } else if (t.endsWith("ст")) {
+            mult = stackSize;
+            t = t.substring(0, t.length() - 2);
+        }
+        try {
+            long v = Long.parseLong(t);
+            return v > 0L ? Math.min(v * mult, 10000000L) : -1L;
+        } catch (NumberFormatException ex) {
+            return -1L;
+        }
+    }
+
+    private void openPoolAmounts(Player p, Quest q, Stage sg) {
+        int idx = q.stages.indexOf(sg);
+        if (idx < 0) {
+            return;
+        }
+        if (sg.pool.isEmpty()) {
+            p.sendMessage(this.text("&cНабір порожній. Додай предмети в скриню."));
+            this.openStageEditor(p, q, idx);
+            return;
+        }
+        List<DialogInput> inputs = new ArrayList<>();
+        for (int i = 0; i < sg.pool.size() && i < 54; i++) {
+            PoolItem pi = sg.pool.get(i);
+            ItemStack sample = this.poolStack(pi);
+            inputs.add(this.line("pq" + i, this.itemNameStr(sample) + " (стак " + sample.getMaxStackSize() + ")", String.valueOf(pi.amount), 12));
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(this.btn("&aЗберегти", v -> this.sync(() -> {
+            for (int i = 0; i < sg.pool.size() && i < 54; i++) {
+                PoolItem pi = sg.pool.get(i);
+                long val = QuestNPC.parseQty(v.apply("pq" + i), this.poolStack(pi).getMaxStackSize());
+                if (val > 0L) {
+                    pi.amount = val;
+                } else {
+                    p.sendMessage(this.text("&cНевірна кількість для пункту " + (i + 1) + " - залишено " + pi.amount));
+                }
+            }
+            this.saveQuests();
+            p.sendMessage(this.text("&aКількості збережено."));
+            this.openPoolAmounts(p, q, sg);
+        })));
+        buttons.add(this.btn("Змінити набір (скриня)", v -> this.sync(() -> this.openPoolChest(p, q, sg))));
+        p.showDialog((DialogLike) this.dialog("&5Кількості набору",
+            List.of(this.para("Число, або 5st = 5 стаків, або 3sh = 3 шалкери (27 стаків у шалкері). Наприклад, 3sh яловичини = 3 x 27 x 64.")),
+            inputs,
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад до етапу", v -> this.sync(() -> this.openStageEditor(p, q, idx))), (int) 1)));
+    }
+
+    // ---- аркуш «Список завдань» ----
+
+    private org.bukkit.NamespacedKey sheetKey() {
+        return new org.bukkit.NamespacedKey((Plugin) this, "task_sheet");
+    }
+
+    private ItemStack makeSheet() {
+        ItemStack it = new ItemStack(Material.PAPER);
+        ItemMeta im = it.getItemMeta();
+        im.displayName(this.text("&6Список завдань"));
+        im.lore(List.of(this.text("&7ПКМ: відкрити журнал квестів"), this.text("&8Взяті квести та їхні деталі")));
+        im.getPersistentDataContainer().set(this.sheetKey(), PersistentDataType.BYTE, (byte) 1);
+        it.setItemMeta(im);
+        return it;
+    }
+
+    private boolean isSheet(ItemStack it) {
+        if (it == null || it.getType() != Material.PAPER || !it.hasItemMeta()) {
+            return false;
+        }
+        return it.getItemMeta().getPersistentDataContainer().has(this.sheetKey(), PersistentDataType.BYTE);
+    }
+
+    @EventHandler(priority = org.bukkit.event.EventPriority.HIGH)
+    public void onSheetUse(PlayerInteractEvent e) {
+        if (e.getHand() != org.bukkit.inventory.EquipmentSlot.HAND) {
+            return;
+        }
+        Action a = e.getAction();
+        if (a != Action.RIGHT_CLICK_AIR && a != Action.RIGHT_CLICK_BLOCK) {
+            return;
+        }
+        if (!this.isSheet(e.getItem())) {
+            return;
+        }
+        e.setCancelled(true);
+        Player p = e.getPlayer();
+        if (this.tooFast(p)) {
+            return;
+        }
+        this.openJournal(p);
+    }
+
+    // ---- журнал: список квестів і вікно деталей ----
+
+    private void openJournal(Player p) {
+        List<DialogBody> body = new ArrayList<>();
+        List<ActionButton> buttons = new ArrayList<>();
+        UUID id = p.getUniqueId();
+        Map<String, QState> m = this.progress.get(id);
+        Quest tq = this.trackedQuest(p);
+        int count = 0;
+        if (m != null) {
+            for (Map.Entry<String, QState> en : m.entrySet()) {
+                QState st = en.getValue();
+                Quest q = this.quests.get(en.getKey());
+                if (q == null || "DONE".equals(st.status)) {
+                    continue;
+                }
+                count++;
+                String tag = "READY".equals(st.status) ? "&6[Здати] " : "";
+                buttons.add(this.btn((q == tq ? "&e★ " : "&f") + tag + q.name, v -> this.sync(() -> this.openQuestProgress(p, q))));
+            }
+        }
+        body.add(this.para(count == 0
+            ? "&7Активних квестів немає. Поговори з жителями, щоб отримати завдання."
+            : "Активних квестів: &f" + count + "&r. Натисни на квест, щоб побачити деталі. &e★&r - відстежується на панелі."));
+        if (!this.lines.isEmpty()) {
+            buttons.add(this.btn("&bЛінійки квестів", v -> this.sync(() -> this.openLines(p))));
+        }
+        buttons.add(this.btn("Панель квестів зверху: " + (this.hudOff.contains(id) ? "&cвимкнена" : "&aувімкнена"), v -> this.sync(() -> {
+            if (!this.hudOff.remove(id)) {
+                this.hudOff.add(id);
+            }
+            this.progressDirty = true;
+            this.updateTracker(p);
+            this.openJournal(p);
+        })));
+        p.showDialog((DialogLike) this.dialog("&6Журнал квестів", body, List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Закрити", null), (int) 1)));
+    }
+
+    private void openQuestProgress(Player p, Quest q) {
+        QState st = this.stateOf(p, q.id);
+        if (st == null || "DONE".equals(st.status)) {
+            this.openJournal(p);
+            return;
+        }
+        List<DialogBody> body = new ArrayList<>();
+        if (!q.description.isBlank()) {
+            body.add(DialogBody.plainMessage((Component) this.fmt(q.description, p)));
+        }
+        boolean ready = "READY".equals(st.status);
+        StringBuilder sb = new StringBuilder("&6Етапи:");
+        for (int i = 0; i < q.stages.size(); i++) {
+            boolean done = ready || i < st.stage;
+            boolean cur = !ready && i == st.stage;
+            sb.append("\n").append(done ? "&a✔ &7" : cur ? "&e▶ &f" : "&8○ &7").append(q.stages.get(i).text);
+        }
+        body.add(DialogBody.plainMessage((Component) this.fmt(sb.toString(), p)));
+        body.add(DialogBody.plainMessage(LEGACY.deserialize("&6Зараз: ").append(this.describeC(p, q, st))));
+        if (!ready && st.stage < q.stages.size() && q.stages.get(st.stage).type.equals("pool")) {
+            body.add(DialogBody.plainMessage(this.poolChecklist(q.stages.get(st.stage), st, null)));
+        }
+        if (q.timeLimit > 0L && "ACTIVE".equals(st.status) && st.startedAt > 0L) {
+            long left = Math.max(0L, st.startedAt + q.timeLimit * 1000L - System.currentTimeMillis());
+            body.add(DialogBody.plainMessage((Component) this.fmt("&cЗалишилось часу: &f" + QuestNPC.clock(left / 1000L), p)));
+        }
+        Component rw = this.rewardsComponent(q);
+        if (rw != null) {
+            body.add(DialogBody.plainMessage(rw));
+        }
+        List<ActionButton> buttons = new ArrayList<>();
+        Quest tq = this.trackedQuest(p);
+        if (q != tq) {
+            buttons.add(this.btn("&eВідстежувати на панелі", v -> this.sync(() -> {
+                this.tracked.put(p.getUniqueId(), q.id);
+                this.progressDirty = true;
+                this.updateTracker(p);
+                this.openQuestProgress(p, q);
+            })));
+        }
+        if (this.getConfig().getBoolean("quest.allow-cancel", true)) {
+            buttons.add(this.btn("&cСкасувати квест", v -> this.sync(() -> this.openCancelConfirm(p, q))));
+        }
+        p.showDialog((DialogLike) this.dialog("&6" + q.name, body, List.of(),
+            (DialogType) DialogType.multiAction(buttons, (ActionButton) this.btn("&7Назад до журналу", v -> this.sync(() -> this.openJournal(p))), (int) 1)));
+    }
+
     private Npc byArg(String[] a) {
         if (a.length < 2) {
             return null;
@@ -4392,7 +5650,7 @@ TabExecutor {
             return List.of();
         }
         if (a.length == 1) {
-            return List.of("give", "list", "remove", "tp", "here", "quests", "editor", "version", "markers", "resetphrases", "chatter", "reload").stream().filter(x -> x.startsWith(a[0].toLowerCase())).toList();
+            return List.of("give", "list", "remove", "tp", "here", "quests", "editor", "version", "markers", "resetphrases", "chatter", "sheet", "reload").stream().filter(x -> x.startsWith(a[0].toLowerCase())).toList();
         }
         if (a.length == 2 && (a[0].equalsIgnoreCase("remove") || a[0].equalsIgnoreCase("tp"))) {
             return this.npcs.keySet().stream().map(String::valueOf).filter(x -> x.startsWith(a[1])).toList();
@@ -4496,6 +5754,7 @@ TabExecutor {
         int count = 0;
         long doneAt = 0L;
         long startedAt = 0L;
+        long[] pool;
 
         QState() {
         }
@@ -4543,6 +5802,10 @@ TabExecutor {
         String stack = "";
         String reply = "";
         String replyFail = "";
+        java.util.List<PoolItem> pool = new ArrayList<PoolItem>();
+        String targets = "";
+        boolean zone = false;
+        java.util.Set<Material> matCache;
         String mobName = "";
         String chat = "";
         int chatNpc = -1;
